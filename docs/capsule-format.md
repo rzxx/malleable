@@ -42,3 +42,12 @@ POST /api/realms/:realmId/capsules
 ```
 
 The daemon writes the manifest, public entry file, and data folder locally.
+
+## Lifecycle
+
+V0 supports direct local lifecycle actions:
+
+- fork: copy the capsule and assign a new manifest id
+- archive: move it out of the active capsule list
+- delete: permanently remove it after confirmation
+- source: open the capsule folder for inspection and edits

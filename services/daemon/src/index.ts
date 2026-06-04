@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +48,10 @@ function slugify(value: string): string {
     .replaceAll(/^-|-$/g, "");
 
   return slug || "capsule";
+}
+
+function timestampSegment(): string {
+  return new Date().toISOString().replaceAll(/[:.]/g, "-");
 }
 
 async function readManifest(capsulePath: string): Promise<CapsuleManifest> {
@@ -155,6 +160,78 @@ async function createCapsule(realmId: string, input: unknown): Promise<CapsuleRe
   return capsule;
 }
 
+async function forkCapsule(realmId: string, capsuleId: string): Promise<CapsuleRecord> {
+  const realm = safeSegment(realmId);
+  const capsule = await findCapsule(realm, safeSegment(capsuleId));
+  if (!capsule) {
+    throw new Error("Capsule not found");
+  }
+
+  const forkId = await nextCapsuleId(realm, `${capsule.manifest.id}-copy`);
+  const forkPath = path.join(realmsRoot, realm, "capsules", forkId);
+  const forkManifest: CapsuleManifest = {
+    ...capsule.manifest,
+    description: capsule.manifest.description
+      ? `Forked from ${capsule.manifest.name}. ${capsule.manifest.description}`
+      : `Forked from ${capsule.manifest.name}.`,
+    id: forkId,
+    name: `${capsule.manifest.name} Copy`
+  };
+
+  await cp(capsule.capsulePath, forkPath, { errorOnExist: true, recursive: true });
+  await writeFile(
+    path.join(forkPath, "capsule.json"),
+    `${JSON.stringify(forkManifest, null, 2)}\n`
+  );
+
+  const fork = await findCapsule(realm, forkId);
+  if (!fork) {
+    throw new Error("Forked capsule could not be loaded");
+  }
+
+  return fork;
+}
+
+async function archiveCapsule(realmId: string, capsuleId: string): Promise<string> {
+  const realm = safeSegment(realmId);
+  const capsule = await findCapsule(realm, safeSegment(capsuleId));
+  if (!capsule) {
+    throw new Error("Capsule not found");
+  }
+
+  const archiveRoot = path.join(realmsRoot, realm, "archive", "capsules");
+  const archivePath = path.join(archiveRoot, `${capsule.manifest.id}-${timestampSegment()}`);
+
+  await mkdir(archiveRoot, { recursive: true });
+  await rename(capsule.capsulePath, archivePath);
+
+  return archivePath;
+}
+
+async function deleteCapsule(realmId: string, capsuleId: string): Promise<void> {
+  const realm = safeSegment(realmId);
+  const capsule = await findCapsule(realm, safeSegment(capsuleId));
+  if (!capsule) {
+    throw new Error("Capsule not found");
+  }
+
+  await rm(capsule.capsulePath, { force: false, recursive: true });
+}
+
+function openPath(targetPath: string): void {
+  if (process.platform === "win32") {
+    spawn("explorer.exe", [targetPath], { detached: true, stdio: "ignore" }).unref();
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    spawn("open", [targetPath], { detached: true, stdio: "ignore" }).unref();
+    return;
+  }
+
+  spawn("xdg-open", [targetPath], { detached: true, stdio: "ignore" }).unref();
+}
+
 app.get("/api/health", async () => ({
   ok: true,
   workspaceRoot
@@ -193,6 +270,19 @@ app.get<{ Params: { realmId: string; capsuleId: string } }>(
 );
 
 app.post<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/fork",
+  async (request, reply) => {
+    try {
+      return { capsule: await forkCapsule(request.params.realmId, request.params.capsuleId) };
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "Could not fork capsule"
+      });
+    }
+  }
+);
+
+app.post<{ Params: { realmId: string; capsuleId: string } }>(
   "/api/realms/:realmId/capsules/:capsuleId/launch",
   async (request, reply) => {
     const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
@@ -203,6 +293,49 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
       status: "running",
       url: `http://127.0.0.1:${port}${capsule.launchUrl}`
     };
+  }
+);
+
+app.post<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/source/open",
+  async (request, reply) => {
+    const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
+    if (!capsule) {
+      return reply.code(404).send({ error: "Capsule not found" });
+    }
+
+    openPath(capsule.sourcePath);
+    return { opened: true, path: capsule.sourcePath };
+  }
+);
+
+app.post<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/archive",
+  async (request, reply) => {
+    try {
+      return {
+        archived: true,
+        path: await archiveCapsule(request.params.realmId, request.params.capsuleId)
+      };
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "Could not archive capsule"
+      });
+    }
+  }
+);
+
+app.delete<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId",
+  async (request, reply) => {
+    try {
+      await deleteCapsule(request.params.realmId, request.params.capsuleId);
+      return { deleted: true };
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "Could not delete capsule"
+      });
+    }
   }
 );
 

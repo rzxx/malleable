@@ -1,4 +1,14 @@
-import { Archive, Code2, Copy, ExternalLink, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Archive,
+  Code2,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  Play,
+  Plus,
+  RefreshCw,
+  Trash2
+} from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { z } from "zod";
@@ -47,6 +57,12 @@ const LaunchPayloadSchema = z.object({
   url: z.string()
 });
 
+const ActionPayloadSchema = z.object({
+  archived: z.boolean().optional(),
+  deleted: z.boolean().optional(),
+  opened: z.boolean().optional()
+});
+
 const CreateCapsulePayloadSchema = z.object({
   capsule: CapsuleSchema
 });
@@ -74,6 +90,10 @@ function readCreateCapsulePayload(value: unknown): Capsule {
   return CreateCapsulePayloadSchema.parse(value).capsule;
 }
 
+function readActionPayload(value: unknown): void {
+  ActionPayloadSchema.parse(value);
+}
+
 function App() {
   const [realms, setRealms] = useState<Realm[]>([]);
   const [capsules, setCapsules] = useState<Capsule[]>([]);
@@ -82,6 +102,7 @@ function App() {
   const [selectedId, setSelectedId] = useState<string>();
   const [runningUrl, setRunningUrl] = useState<string>();
   const [status, setStatus] = useState("Connecting to daemon");
+  const [activeAction, setActiveAction] = useState<string>();
   const [isCreating, setIsCreating] = useState(false);
 
   const selected = useMemo(
@@ -117,6 +138,44 @@ function App() {
     );
     setRunningUrl(readLaunchPayload(await readJson(response)));
     setStatus("Running");
+  }
+
+  async function sendCapsuleAction(
+    capsule: Capsule,
+    action: "archive" | "fork" | "source/open",
+    label: string
+  ): Promise<unknown> {
+    setActiveAction(action);
+    setStatus(label);
+
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/${action}`,
+        { method: "POST" }
+      );
+      const payload = await readJson(response);
+
+      if (!response.ok) {
+        const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
+        throw new Error(message ?? `${label} failed`);
+      }
+
+      return payload;
+    } finally {
+      setActiveAction(undefined);
+    }
+  }
+
+  function removeCapsule(capsule: Capsule) {
+    setCapsules((current) => {
+      const remaining = current.filter((existing) => existing.manifest.id !== capsule.manifest.id);
+      setSelectedId(remaining[0]?.manifest.id);
+      return remaining;
+    });
+
+    if (runningUrl?.includes(`/capsules/${capsule.realmId}/${capsule.manifest.id}/`)) {
+      setRunningUrl(undefined);
+    }
   }
 
   async function createCapsule() {
@@ -162,6 +221,63 @@ function App() {
       setStatus("Created");
     } finally {
       setIsCreating(false);
+    }
+  }
+
+  async function forkCapsule(capsule: Capsule) {
+    const payload = await sendCapsuleAction(capsule, "fork", "Forking capsule");
+    const fork = readCreateCapsulePayload(payload);
+    setCapsules((current) => [
+      fork,
+      ...current.filter((existing) => existing.manifest.id !== fork.manifest.id)
+    ]);
+    setSelectedId(fork.manifest.id);
+    setRunningUrl(undefined);
+    setStatus("Forked");
+  }
+
+  async function openSource(capsule: Capsule) {
+    readActionPayload(await sendCapsuleAction(capsule, "source/open", "Opening source"));
+    setStatus("Source opened");
+  }
+
+  async function archiveCapsule(capsule: Capsule) {
+    const confirmed = window.confirm(`Archive ${capsule.manifest.name}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    readActionPayload(await sendCapsuleAction(capsule, "archive", "Archiving capsule"));
+    removeCapsule(capsule);
+    setStatus("Archived");
+  }
+
+  async function deleteCapsule(capsule: Capsule) {
+    const confirmed = window.confirm(`Permanently delete ${capsule.manifest.name}?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setActiveAction("delete");
+    setStatus("Deleting capsule");
+
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}`,
+        { method: "DELETE" }
+      );
+      const payload = await readJson(response);
+
+      if (!response.ok) {
+        const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
+        throw new Error(message ?? "Delete failed");
+      }
+
+      readActionPayload(payload);
+      removeCapsule(capsule);
+      setStatus("Deleted");
+    } finally {
+      setActiveAction(undefined);
     }
   }
 
@@ -256,6 +372,7 @@ function App() {
                 </button>
                 <button
                   type="button"
+                  aria-label="Refresh capsule list"
                   title="Refresh capsule list"
                   onClick={() => {
                     load().catch((error: unknown) => {
@@ -265,14 +382,57 @@ function App() {
                 >
                   <RefreshCw size={17} />
                 </button>
-                <button type="button" title="Fork capsule" disabled>
+                <button
+                  type="button"
+                  title="Open capsule source"
+                  disabled={Boolean(activeAction)}
+                  onClick={() => {
+                    openSource(selected).catch((error: unknown) => {
+                      setStatus(error instanceof Error ? error.message : "Open source failed");
+                    });
+                  }}
+                >
+                  <FolderOpen size={17} />
+                  Source
+                </button>
+                <button
+                  type="button"
+                  title="Fork capsule"
+                  disabled={Boolean(activeAction)}
+                  onClick={() => {
+                    forkCapsule(selected).catch((error: unknown) => {
+                      setStatus(error instanceof Error ? error.message : "Fork failed");
+                    });
+                  }}
+                >
                   <Copy size={17} />
+                  Fork
                 </button>
-                <button type="button" title="Archive capsule" disabled>
+                <button
+                  type="button"
+                  title="Archive capsule"
+                  disabled={Boolean(activeAction)}
+                  onClick={() => {
+                    archiveCapsule(selected).catch((error: unknown) => {
+                      setStatus(error instanceof Error ? error.message : "Archive failed");
+                    });
+                  }}
+                >
                   <Archive size={17} />
+                  Archive
                 </button>
-                <button type="button" title="Delete capsule" disabled>
+                <button
+                  type="button"
+                  title="Delete capsule"
+                  disabled={Boolean(activeAction)}
+                  onClick={() => {
+                    deleteCapsule(selected).catch((error: unknown) => {
+                      setStatus(error instanceof Error ? error.message : "Delete failed");
+                    });
+                  }}
+                >
                   <Trash2 size={17} />
+                  Delete
                 </button>
               </nav>
             </header>
