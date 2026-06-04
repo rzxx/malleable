@@ -1,15 +1,20 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import cors from "@fastify/cors";
-import { parseCapsuleManifest, type CapsuleManifest } from "@malleable/capsule-schema";
+import {
+  parseCapsuleManifest,
+  parseCreateCapsuleInput,
+  type CapsuleManifest
+} from "@malleable/capsule-schema";
 import Fastify from "fastify";
 import { lookup as lookupMime } from "mime-types";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(currentDir, "../../..");
 const realmsRoot = path.join(workspaceRoot, "realms");
+const templatePath = path.join(workspaceRoot, "templates", "capsules", "basic-static");
 const port = Number(process.env.DAEMON_PORT ?? 4877);
 
 type CapsuleRecord = {
@@ -29,6 +34,19 @@ function safeSegment(value: string): string {
   }
 
   return value;
+}
+
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-|-$/g, "");
+
+  return slug || "capsule";
 }
 
 async function readManifest(capsulePath: string): Promise<CapsuleManifest> {
@@ -72,9 +90,69 @@ async function listCapsules(realmId: string): Promise<CapsuleRecord[]> {
   return records;
 }
 
+async function nextCapsuleId(realmId: string, preferredId: string): Promise<string> {
+  const existing = new Set((await listCapsules(realmId)).map((capsule) => capsule.manifest.id));
+  if (!existing.has(preferredId)) {
+    return preferredId;
+  }
+
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${preferredId}-${index}`;
+    if (!existing.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error("Could not create unique capsule id");
+}
+
 async function findCapsule(realmId: string, capsuleId: string): Promise<CapsuleRecord | undefined> {
   const capsules = await listCapsules(realmId);
   return capsules.find((capsule) => capsule.manifest.id === capsuleId);
+}
+
+async function createCapsule(realmId: string, input: unknown): Promise<CapsuleRecord> {
+  const realm = safeSegment(realmId);
+  const parsed = parseCreateCapsuleInput(input);
+  const capsuleId = await nextCapsuleId(realm, parsed.id ?? slugify(parsed.name));
+  const capsulesRoot = path.join(realmsRoot, realm, "capsules");
+  const capsulePath = path.join(capsulesRoot, capsuleId);
+  const publicPath = path.join(capsulePath, "public");
+  const dataPath = path.join(capsulePath, "data");
+  const description =
+    parsed.description?.trim() || "A local static capsule created from a template.";
+  const manifest: CapsuleManifest = {
+    capabilities: {
+      commands: [],
+      files: [],
+      network: [],
+      storage: ["own-data"]
+    },
+    description,
+    entry: {
+      path: "public/index.html",
+      type: "static"
+    },
+    id: capsuleId,
+    name: parsed.name,
+    version: "0.0.1"
+  };
+  const template = await readFile(path.join(templatePath, "public", "index.html"), "utf8");
+  const html = template
+    .replaceAll("{{CAPSULE_NAME}}", escapeHtml(manifest.name))
+    .replaceAll("{{CAPSULE_DESCRIPTION}}", escapeHtml(description));
+
+  await mkdir(publicPath, { recursive: true });
+  await mkdir(dataPath, { recursive: true });
+  await writeFile(path.join(capsulePath, "capsule.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(path.join(publicPath, "index.html"), html);
+
+  const capsule = await findCapsule(realm, capsuleId);
+  if (!capsule) {
+    throw new Error("Created capsule could not be loaded");
+  }
+
+  return capsule;
 }
 
 app.get("/api/health", async () => ({
@@ -89,6 +167,19 @@ app.get("/api/realms", async () => ({
 app.get<{ Params: { realmId: string } }>("/api/realms/:realmId/capsules", async (request) => ({
   capsules: await listCapsules(request.params.realmId)
 }));
+
+app.post<{ Body: unknown; Params: { realmId: string } }>(
+  "/api/realms/:realmId/capsules",
+  async (request, reply) => {
+    try {
+      return { capsule: await createCapsule(request.params.realmId, request.body) };
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "Could not create capsule"
+      });
+    }
+  }
+);
 
 app.get<{ Params: { realmId: string; capsuleId: string } }>(
   "/api/realms/:realmId/capsules/:capsuleId",

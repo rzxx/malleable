@@ -17,8 +17,23 @@ export const CapsuleManifestSchema = z.object({
   })
 });
 
+export const CreateCapsuleInputSchema = z.object({
+  description: z.string().max(240).optional(),
+  id: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]*$/)
+    .optional(),
+  name: z.string().trim().min(1).max(80),
+  templateId: z.literal("basic-static").default("basic-static")
+});
+
 export type CapsuleManifest = z.infer<typeof CapsuleManifestSchema>;
+export type CreateCapsuleInput = z.infer<typeof CreateCapsuleInputSchema>;
 
 export function parseCapsuleManifest(input: unknown): CapsuleManifest {
   return CapsuleManifestSchema.parse(input);
+}
+
+export function parseCreateCapsuleInput(input: unknown): CreateCapsuleInput {
+  return CreateCapsuleInputSchema.parse(input);
 }
