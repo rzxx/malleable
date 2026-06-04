@@ -16,8 +16,6 @@ Create a capsule from a tiny starter template.
 
 Edit a capsule, refresh it, and keep the artifact local.
 
-Status: source opening and refresh are available.
-
 ## 5. Agent Workbench
 
 Generate and patch capsules inside clear filesystem boundaries.
