@@ -1,0 +1,278 @@
+:root {
+  color: #182026;
+  background: #e8ece7;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+a {
+  font: inherit;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 18px;
+  padding: 18px;
+  background: #233238;
+  color: #f4f0e8;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand h1,
+.toolbar h2,
+.inspector h3,
+.empty-state h2 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.brand h1 {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.brand span,
+.realm-strip span,
+.capsule span,
+.toolbar span,
+.empty-state span {
+  color: #aebcb9;
+  font-size: 13px;
+}
+
+.realm-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid #3b4d53;
+  border-bottom: 1px solid #3b4d53;
+  padding: 12px 0;
+}
+
+.capsule-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+}
+
+.capsule {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 62px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.capsule:hover,
+.capsule.active {
+  border-color: #5d7378;
+  background: #304349;
+}
+
+.capsule strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+  padding: 20px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 64px;
+  border-bottom: 1px solid #c9d0ca;
+  padding-bottom: 16px;
+}
+
+.toolbar h2 {
+  font-size: 22px;
+}
+
+.toolbar span {
+  display: block;
+  max-width: min(68vw, 860px);
+  overflow: hidden;
+  color: #5d6968;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.actions button,
+.inspector a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 38px;
+  height: 38px;
+  border: 1px solid #b5c0ba;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #f8faf7;
+  color: #1d2b30;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.actions button:hover,
+.inspector a:hover {
+  border-color: #739379;
+}
+
+.actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(320px, 420px);
+  gap: 16px;
+  min-height: 0;
+  padding-top: 16px;
+}
+
+.preview,
+.inspector,
+.empty-state {
+  min-height: 0;
+  border: 1px solid #c9d0ca;
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.preview {
+  overflow: hidden;
+}
+
+.preview iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 520px;
+  border: 0;
+  background: white;
+}
+
+.empty-preview,
+.empty-state {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 520px;
+  color: #697675;
+}
+
+.inspector {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+
+.inspector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #d8ddd8;
+  padding: 12px;
+}
+
+.inspector h3 {
+  font-size: 15px;
+}
+
+.inspector pre {
+  min-width: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: #2e3b40;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 860px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    grid-template-rows: auto auto auto;
+  }
+
+  .capsule-list {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(180px, 1fr);
+    overflow-x: auto;
+  }
+
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .toolbar span {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+}

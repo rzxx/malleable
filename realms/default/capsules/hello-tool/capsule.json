@@ -1,0 +1,16 @@
+{
+  "id": "hello-tool",
+  "name": "Hello Tool",
+  "version": "0.0.1",
+  "description": "A tiny static capsule for proving launch, inspect, and mutate.",
+  "entry": {
+    "type": "static",
+    "path": "public/index.html"
+  },
+  "capabilities": {
+    "storage": ["own-data"],
+    "network": [],
+    "commands": [],
+    "files": []
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "malleable",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @malleable/capsule-schema build && pnpm --parallel --filter @malleable/daemon --filter @malleable/shell dev",
+    "build": "pnpm -r build",
+    "check": "oxfmt --write . && oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives && pnpm -r typecheck",
+    "format": "oxfmt --write .",
+    "lint": "oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.53.0",
+    "oxlint": "^1.68.0",
+    "oxlint-tsgolint": "^0.23.0",
+    "typescript": "^6.0.3"
+  },
+  "packageManager": "pnpm@10.17.1"
+}
