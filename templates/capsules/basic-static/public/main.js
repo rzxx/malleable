@@ -4,9 +4,7 @@ import {
   defineCapsuleState,
   schema,
   value
-} from "@malleable/capsule-state";
-
-import "./styles.css";
+} from "/capsule-runtime/state.js";
 
 const UsageSchema = schema.object({
   id: schema.string(),
@@ -35,30 +33,20 @@ const state = defineCapsuleState({
   version: 1
 });
 
-const capsuleName = "Hello Tool";
-const capsuleDescription =
-  "A tiny native TypeScript capsule for proving launch, inspect, watch, and mutate.";
+const capsuleName = __MALLEABLE_CAPSULE_NAME_JSON__;
+const capsuleDescription = __MALLEABLE_CAPSULE_DESCRIPTION_JSON__;
 const db = createCapsuleStateClient(state);
 const preferencesStore = db.value(state.stores.preferences);
 const usagesStore = db.collection(state.stores.usages);
 
-document.querySelector<HTMLDivElement>("#root")!.innerHTML = `
-  <main class="tool">
-    <section>
-      <h1></h1>
-      <p></p>
-    </section>
-    <button type="button"></button>
-  </main>
-`;
+const button = document.querySelector("#action");
+const result = document.querySelector("#result");
 
-const title = document.querySelector<HTMLHeadingElement>("h1")!;
-const message = document.querySelector<HTMLParagraphElement>("p")!;
-const button = document.querySelector<HTMLButtonElement>("button")!;
+if (!button || !result) {
+  throw new Error("Capsule markup is missing required controls");
+}
 
-title.textContent = capsuleName;
-
-async function render(): Promise<void> {
+async function render() {
   const [preferences, usages] = await Promise.all([
     preferencesStore.get(),
     usagesStore.list({
@@ -69,7 +57,7 @@ async function render(): Promise<void> {
   ]);
 
   button.textContent = preferences.buttonLabel;
-  message.textContent =
+  result.textContent =
     usages.length === 0
       ? capsuleDescription
       : `${capsuleName} has been used ${usages.length} time${usages.length === 1 ? "" : "s"}.`;
@@ -84,14 +72,14 @@ button.addEventListener("click", () => {
       usedAt: new Date().toISOString()
     })
     .then(render)
-    .catch((error: unknown) => {
-      message.textContent = error instanceof Error ? error.message : "Could not save capsule state";
+    .catch((error) => {
+      result.textContent = error instanceof Error ? error.message : "Could not save capsule state";
     })
     .finally(() => {
       button.disabled = false;
     });
 });
 
-render().catch((error: unknown) => {
-  message.textContent = error instanceof Error ? error.message : "Could not load capsule state";
+render().catch((error) => {
+  result.textContent = error instanceof Error ? error.message : "Could not load capsule state";
 });

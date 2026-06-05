@@ -6,6 +6,8 @@ import {
   value
 } from "@malleable/capsule-state";
 
+import "./styles.css";
+
 const UsageSchema = schema.object({
   id: schema.string(),
   label: schema.string(),
@@ -33,21 +35,27 @@ const state = defineCapsuleState({
   version: 1
 });
 
-const capsuleName = "__MALLEABLE_CAPSULE_NAME__";
-const capsuleDescription = "__MALLEABLE_CAPSULE_DESCRIPTION__";
+const capsuleName = __MALLEABLE_CAPSULE_NAME_JSON__;
+const capsuleDescription = __MALLEABLE_CAPSULE_DESCRIPTION_JSON__;
 const db = createCapsuleStateClient(state);
 const preferencesStore = db.value(state.stores.preferences);
 const usagesStore = db.collection(state.stores.usages);
 
-const button = document.querySelector<HTMLButtonElement>("#action");
-const result = document.querySelector<HTMLOutputElement>("#result");
+document.querySelector<HTMLDivElement>("#root")!.innerHTML = `
+  <main class="tool">
+    <section>
+      <h1></h1>
+      <p></p>
+    </section>
+    <button type="button"></button>
+  </main>
+`;
 
-if (!button || !result) {
-  throw new Error("Capsule markup is missing required controls");
-}
+const title = document.querySelector<HTMLHeadingElement>("h1")!;
+const message = document.querySelector<HTMLParagraphElement>("p")!;
+const button = document.querySelector<HTMLButtonElement>("button")!;
 
-const actionButton = button;
-const statusOutput = result;
+title.textContent = capsuleName;
 
 async function render(): Promise<void> {
   const [preferences, usages] = await Promise.all([
@@ -59,15 +67,15 @@ async function render(): Promise<void> {
     })
   ]);
 
-  actionButton.textContent = preferences.buttonLabel;
-  statusOutput.textContent =
+  button.textContent = preferences.buttonLabel;
+  message.textContent =
     usages.length === 0
       ? capsuleDescription
       : `${capsuleName} has been used ${usages.length} time${usages.length === 1 ? "" : "s"}.`;
 }
 
-actionButton.addEventListener("click", () => {
-  actionButton.disabled = true;
+button.addEventListener("click", () => {
+  button.disabled = true;
   void usagesStore
     .insert({
       id: crypto.randomUUID(),
@@ -76,15 +84,13 @@ actionButton.addEventListener("click", () => {
     })
     .then(render)
     .catch((error: unknown) => {
-      statusOutput.textContent =
-        error instanceof Error ? error.message : "Could not save capsule state";
+      message.textContent = error instanceof Error ? error.message : "Could not save capsule state";
     })
     .finally(() => {
-      actionButton.disabled = false;
+      button.disabled = false;
     });
 });
 
 render().catch((error: unknown) => {
-  statusOutput.textContent =
-    error instanceof Error ? error.message : "Could not load capsule state";
+  message.textContent = error instanceof Error ? error.message : "Could not load capsule state";
 });

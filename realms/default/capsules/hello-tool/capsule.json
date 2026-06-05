@@ -2,10 +2,12 @@
   "id": "hello-tool",
   "name": "Hello Tool",
   "version": "0.0.1",
-  "description": "A tiny static capsule for proving launch, inspect, and mutate.",
+  "description": "A tiny native TypeScript capsule for proving launch, inspect, watch, and mutate.",
   "entry": {
-    "type": "static",
-    "path": "public/index.html"
+    "type": "web",
+    "main": "src/main.ts",
+    "framework": "vanilla",
+    "reload": "prompt"
   },
   "capabilities": {
     "storage": ["own-data"],

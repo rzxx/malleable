@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @malleable/capsule-schema build && pnpm --filter @malleable/capsule-state build && pnpm --parallel --filter @malleable/daemon --filter @malleable/shell dev",
+    "dev": "pnpm --parallel --filter @malleable/daemon --filter @malleable/shell dev",
     "build": "pnpm -r build",
-    "check": "pnpm --filter @malleable/capsule-state build && oxfmt --write . && oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives && pnpm -r typecheck",
+    "check": "oxfmt --write . && oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives && pnpm -r typecheck",
     "format": "oxfmt --write .",
     "lint": "oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives",
     "typecheck": "pnpm -r typecheck"

@@ -22,6 +22,19 @@ const RealmSchema = z.object({
   path: z.string()
 });
 
+const CapsuleEntrySchema = z.discriminatedUnion("type", [
+  z.object({
+    path: z.string(),
+    type: z.literal("static")
+  }),
+  z.object({
+    framework: z.enum(["vanilla", "react", "solid", "svelte"]),
+    main: z.string(),
+    reload: z.enum(["prompt", "hmr"]),
+    type: z.literal("web")
+  })
+]);
+
 const CapsuleSchema = z.object({
   capsulePath: z.string(),
   launchUrl: z.string(),
@@ -33,10 +46,7 @@ const CapsuleSchema = z.object({
       storage: z.array(z.string())
     }),
     description: z.string().optional(),
-    entry: z.object({
-      path: z.string(),
-      type: z.literal("static")
-    }),
+    entry: CapsuleEntrySchema,
     id: z.string(),
     name: z.string(),
     version: z.string()
@@ -57,6 +67,14 @@ const LaunchPayloadSchema = z.object({
   url: z.string()
 });
 
+const CapsuleStatusSchema = z.object({
+  capsuleId: z.string(),
+  error: z.string().optional(),
+  realmId: z.string(),
+  revision: z.number(),
+  state: z.enum(["building", "dirty", "error", "ready"])
+});
+
 const ActionPayloadSchema = z.object({
   archived: z.boolean().optional(),
   deleted: z.boolean().optional(),
@@ -69,6 +87,7 @@ const CreateCapsulePayloadSchema = z.object({
 
 type Realm = z.infer<typeof RealmSchema>;
 type Capsule = z.infer<typeof CapsuleSchema>;
+type CapsuleStatus = z.infer<typeof CapsuleStatusSchema>;
 
 async function readJson(response: Response): Promise<unknown> {
   return await response.json();
@@ -97,8 +116,10 @@ function readActionPayload(value: unknown): void {
 function App() {
   const [realms, setRealms] = useState<Realm[]>([]);
   const [capsules, setCapsules] = useState<Capsule[]>([]);
+  const [iframeNonce, setIframeNonce] = useState(0);
   const [newCapsuleDescription, setNewCapsuleDescription] = useState("");
   const [newCapsuleName, setNewCapsuleName] = useState("");
+  const [reloadNotice, setReloadNotice] = useState<CapsuleStatus>();
   const [selectedId, setSelectedId] = useState<string>();
   const [runningUrl, setRunningUrl] = useState<string>();
   const [status, setStatus] = useState("Connecting to daemon");
@@ -137,6 +158,8 @@ function App() {
       { method: "POST" }
     );
     setRunningUrl(readLaunchPayload(await readJson(response)));
+    setIframeNonce((current) => current + 1);
+    setReloadNotice(undefined);
     setStatus("Running");
   }
 
@@ -195,7 +218,7 @@ function App() {
         body: JSON.stringify({
           description: description || undefined,
           name,
-          templateId: "basic-static"
+          templateId: "web-react"
         }),
         headers: {
           "Content-Type": "application/json"
@@ -216,6 +239,7 @@ function App() {
       ]);
       setSelectedId(capsule.manifest.id);
       setRunningUrl(undefined);
+      setReloadNotice(undefined);
       setNewCapsuleName("");
       setNewCapsuleDescription("");
       setStatus("Created");
@@ -233,6 +257,7 @@ function App() {
     ]);
     setSelectedId(fork.manifest.id);
     setRunningUrl(undefined);
+    setReloadNotice(undefined);
     setStatus("Forked");
   }
 
@@ -286,6 +311,50 @@ function App() {
       setStatus(error instanceof Error ? error.message : "Daemon unavailable");
     });
   }, []);
+
+  useEffect(() => {
+    const events = new EventSource(`${apiBase}/api/capsule-events`);
+
+    function readStatus(event: MessageEvent<string>) {
+      const parsed = CapsuleStatusSchema.safeParse(JSON.parse(event.data) as unknown);
+      if (!parsed.success) {
+        return;
+      }
+
+      const nextStatus = parsed.data;
+      const capsuleUrl = `/capsules/${nextStatus.realmId}/${nextStatus.capsuleId}/`;
+      if (!runningUrl?.includes(capsuleUrl)) {
+        return;
+      }
+
+      if (nextStatus.state === "dirty" || nextStatus.state === "building") {
+        setStatus("Capsule source changed");
+        return;
+      }
+
+      if (nextStatus.state === "error") {
+        setReloadNotice(nextStatus);
+        setStatus(nextStatus.error ?? "Capsule build failed");
+        return;
+      }
+
+      setReloadNotice(nextStatus);
+      setStatus("Capsule update ready");
+    }
+
+    events.addEventListener("capsule", readStatus);
+    events.addEventListener("error", () => {
+      setStatus("Capsule watch disconnected");
+    });
+
+    return () => {
+      events.close();
+    };
+  }, [runningUrl]);
+
+  const shouldShowReload =
+    reloadNotice?.state === "ready" &&
+    runningUrl?.includes(`/capsules/${reloadNotice.realmId}/${reloadNotice.capsuleId}/`);
 
   return (
     <main className="shell">
@@ -355,9 +424,27 @@ function App() {
             <header className="toolbar">
               <div>
                 <h2>{selected.manifest.name}</h2>
-                <span>{selected.manifest.description ?? selected.sourcePath}</span>
+                <span>
+                  {selected.manifest.entry.type === "web"
+                    ? `${selected.manifest.entry.framework} - ${selected.manifest.entry.main}`
+                    : selected.manifest.entry.path}
+                </span>
               </div>
               <nav className="actions" aria-label="Capsule actions">
+                {shouldShowReload ? (
+                  <button
+                    type="button"
+                    title="Reload capsule changes"
+                    onClick={() => {
+                      setIframeNonce((current) => current + 1);
+                      setReloadNotice(undefined);
+                      setStatus("Reloaded capsule");
+                    }}
+                  >
+                    <RefreshCw size={17} />
+                    Reload
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   title="Launch capsule"
@@ -441,6 +528,7 @@ function App() {
               <section className="preview">
                 {runningUrl ? (
                   <iframe
+                    key={iframeNonce}
                     title="Running capsule"
                     src={runningUrl}
                     sandbox="allow-forms allow-modals allow-popups allow-scripts"

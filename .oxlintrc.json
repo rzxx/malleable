@@ -30,7 +30,8 @@
     "**/node_modules/**",
     "**/.dev-logs/**",
     "**/*.tsbuildinfo",
-    "realms/**/capsules/**/public/main.js"
+    "realms/**/capsules/**",
+    "templates/capsules/**"
   ],
   "options": {
     "typeAware": true,

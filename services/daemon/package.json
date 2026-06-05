@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --conditions=development src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -12,12 +12,18 @@
     "@fastify/cors": "^11.2.0",
     "@malleable/capsule-schema": "workspace:*",
     "@malleable/capsule-state": "workspace:*",
+    "chokidar": "^5.0.0",
     "fastify": "^5.8.5",
-    "mime-types": "^3.0.2"
+    "mime-types": "^3.0.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "rolldown": "^1.1.0"
   },
   "devDependencies": {
     "@types/mime-types": "^3.0.1",
     "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }

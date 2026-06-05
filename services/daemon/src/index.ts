@@ -9,21 +9,25 @@ import cors from "@fastify/cors";
 import {
   parseCapsuleManifest,
   parseCreateCapsuleInput,
-  type CapsuleManifest
+  type CapsuleManifest,
+  type CapsuleTemplateId
 } from "@malleable/capsule-schema";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { lookup as lookupMime } from "mime-types";
+import { rolldown } from "rolldown";
+
+import { CapsuleDevHost } from "./capsule-dev-host.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(currentDir, "../../..");
 const realmsRoot = path.join(workspaceRoot, "realms");
-const templatePath = path.join(workspaceRoot, "templates", "capsules", "basic-static");
-const capsuleStateRuntimePath = path.join(
+const templatesRoot = path.join(workspaceRoot, "templates", "capsules");
+const capsuleStateRuntimeSourcePath = path.join(
   workspaceRoot,
   "packages",
   "capsule-state",
-  "dist",
-  "index.js"
+  "src",
+  "index.ts"
 );
 const port = Number(process.env.DAEMON_PORT ?? 4877);
 
@@ -53,6 +57,45 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const capsuleSessions = new Map<string, CapsuleSession>();
+const capsuleDevHost = new CapsuleDevHost(workspaceRoot);
+
+const capsuleTemplates: Record<
+  CapsuleTemplateId,
+  {
+    readonly defaultDescription: string;
+    readonly entry: CapsuleManifest["entry"];
+    readonly path: string;
+  }
+> = {
+  "basic-static": {
+    defaultDescription: "A local static capsule created from a template.",
+    entry: {
+      path: "public/index.html",
+      type: "static"
+    },
+    path: path.join(templatesRoot, "basic-static")
+  },
+  "web-react": {
+    defaultDescription: "A local React capsule created from a native TypeScript template.",
+    entry: {
+      framework: "react",
+      main: "src/main.tsx",
+      reload: "prompt",
+      type: "web"
+    },
+    path: path.join(templatesRoot, "web-react")
+  },
+  "web-vanilla": {
+    defaultDescription: "A local TypeScript capsule created from a native web template.",
+    entry: {
+      framework: "vanilla",
+      main: "src/main.ts",
+      reload: "prompt",
+      type: "web"
+    },
+    path: path.join(templatesRoot, "web-vanilla")
+  }
+};
 
 function safeSegment(value: string): string {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(value)) {
@@ -87,80 +130,68 @@ function timestampSegment(): string {
   return new Date().toISOString().replaceAll(/[:.]/g, "-");
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  const fileStat = await stat(filePath).catch(() => undefined);
-  return Boolean(fileStat?.isFile());
-}
-
-async function runProcess(command: string, args: readonly string[], cwd: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, [...args], {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    const output: string[] = [];
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      output.push(chunk.toString("utf8"));
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      output.push(chunk.toString("utf8"));
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(output.join("").trim() || `${command} exited with code ${code}`));
-    });
-  });
-}
-
-async function rewriteCapsuleImports(capsulePath: string): Promise<void> {
-  const outputPath = path.join(capsulePath, "public", "main.js");
-  const source = await readFile(outputPath, "utf8").catch(() => undefined);
-  if (!source) {
-    return;
-  }
-
-  const rewritten = source
-    .replaceAll('from "@malleable/capsule-state"', 'from "/capsule-runtime/state.js"')
-    .replaceAll("from '@malleable/capsule-state'", "from '/capsule-runtime/state.js'");
-
-  if (rewritten !== source) {
-    await writeFile(outputPath, rewritten);
-  }
-}
-
-async function buildCapsule(capsulePath: string): Promise<void> {
-  const tsconfigPath = path.join(capsulePath, "tsconfig.json");
-  const hasBuild = await fileExists(tsconfigPath);
-  if (!hasBuild) {
-    return;
-  }
-
-  const pnpmEntrypoint = process.env.npm_execpath;
-  if (!pnpmEntrypoint) {
-    throw new Error("Could not find pnpm entrypoint for capsule build");
-  }
-
-  if (pnpmEntrypoint.toLowerCase().endsWith(".exe")) {
-    await runProcess(pnpmEntrypoint, ["exec", "tsc", "-p", tsconfigPath], workspaceRoot);
-  } else {
-    await runProcess(
-      process.execPath,
-      [pnpmEntrypoint, "exec", "tsc", "-p", tsconfigPath],
-      workspaceRoot
-    );
-  }
-  await rewriteCapsuleImports(capsulePath);
-}
-
 async function readManifest(capsulePath: string): Promise<CapsuleManifest> {
   const raw = await readFile(path.join(capsulePath, "capsule.json"), "utf8");
   return parseCapsuleManifest(JSON.parse(raw));
+}
+
+async function rewriteTemplatePlaceholders(
+  targetPath: string,
+  replacements: Readonly<Record<string, string>>
+): Promise<void> {
+  const entries = await readdir(targetPath, { withFileTypes: true });
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = path.join(targetPath, entry.name);
+      if (entry.isDirectory()) {
+        await rewriteTemplatePlaceholders(entryPath, replacements);
+        return;
+      }
+
+      if (!entry.isFile()) {
+        return;
+      }
+
+      const extension = path.extname(entry.name);
+      if (![".css", ".html", ".js", ".json", ".ts", ".tsx"].includes(extension)) {
+        return;
+      }
+
+      const source = await readFile(entryPath, "utf8");
+      let next = source;
+      for (const [placeholder, replacement] of Object.entries(replacements)) {
+        next = next.replaceAll(placeholder, replacement);
+      }
+
+      if (next !== source) {
+        await writeFile(entryPath, next);
+      }
+    })
+  );
+}
+
+async function bundleCapsuleStateRuntime(): Promise<string | undefined> {
+  const bundle = await rolldown({
+    input: capsuleStateRuntimeSourcePath,
+    logLevel: "silent",
+    platform: "browser"
+  }).catch(() => undefined);
+  if (!bundle) {
+    return undefined;
+  }
+
+  try {
+    const result = await bundle.generate({
+      entryFileNames: "state.js",
+      format: "esm"
+    });
+    const output = result.output.find((item) => item.type === "chunk");
+
+    return output?.type === "chunk" ? output.code : undefined;
+  } finally {
+    await bundle.close();
+  }
 }
 
 async function listRealms() {
@@ -191,7 +222,10 @@ async function listCapsules(realmId: string): Promise<CapsuleRecord[]> {
       manifest,
       realmId: realm,
       capsulePath,
-      sourcePath: capsulePath,
+      sourcePath:
+        manifest.entry.type === "web"
+          ? path.join(capsulePath, "src")
+          : path.join(capsulePath, manifest.entry.path),
       launchUrl: `/capsules/${realm}/${manifest.id}/`
     });
   }
@@ -355,13 +389,12 @@ function createLaunchToken(capsule: CapsuleRecord): string {
 async function createCapsule(realmId: string, input: unknown): Promise<CapsuleRecord> {
   const realm = safeSegment(realmId);
   const parsed = parseCreateCapsuleInput(input);
+  const template = capsuleTemplates[parsed.templateId];
   const capsuleId = await nextCapsuleId(realm, parsed.id ?? slugify(parsed.name));
   const capsulesRoot = path.join(realmsRoot, realm, "capsules");
   const capsulePath = path.join(capsulesRoot, capsuleId);
-  const publicPath = path.join(capsulePath, "public");
   const dataPath = path.join(capsulePath, "data");
-  const description =
-    parsed.description?.trim() || "A local static capsule created from a template.";
+  const description = parsed.description?.trim() || template.defaultDescription;
   const manifest: CapsuleManifest = {
     capabilities: {
       commands: [],
@@ -370,37 +403,22 @@ async function createCapsule(realmId: string, input: unknown): Promise<CapsuleRe
       storage: ["own-data"]
     },
     description,
-    entry: {
-      path: "public/index.html",
-      type: "static"
-    },
+    entry: template.entry,
     id: capsuleId,
     name: parsed.name,
     version: "0.0.1"
   };
   await mkdir(capsulesRoot, { recursive: true });
-  await cp(templatePath, capsulePath, { errorOnExist: true, recursive: true });
-  await mkdir(publicPath, { recursive: true });
+  await cp(template.path, capsulePath, { errorOnExist: true, recursive: true });
   await mkdir(dataPath, { recursive: true });
 
-  const indexTemplate = await readFile(path.join(publicPath, "index.html"), "utf8");
-  const html = indexTemplate
-    .replaceAll("{{CAPSULE_NAME}}", escapeHtml(manifest.name))
-    .replaceAll("{{CAPSULE_DESCRIPTION}}", escapeHtml(description));
-  const sourcePath = path.join(capsulePath, "src", "main.ts");
-  const sourceTemplate = await readFile(sourcePath, "utf8").catch(() => undefined);
-
   await writeFile(path.join(capsulePath, "capsule.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(path.join(publicPath, "index.html"), html);
-  if (sourceTemplate) {
-    await writeFile(
-      sourcePath,
-      sourceTemplate
-        .replaceAll('"__MALLEABLE_CAPSULE_NAME__"', JSON.stringify(manifest.name))
-        .replaceAll('"__MALLEABLE_CAPSULE_DESCRIPTION__"', JSON.stringify(description))
-    );
-  }
-  await buildCapsule(capsulePath);
+  await rewriteTemplatePlaceholders(capsulePath, {
+    __MALLEABLE_CAPSULE_DESCRIPTION_JSON__: JSON.stringify(description),
+    __MALLEABLE_CAPSULE_NAME_JSON__: JSON.stringify(manifest.name),
+    "{{CAPSULE_DESCRIPTION}}": escapeHtml(description),
+    "{{CAPSULE_NAME}}": escapeHtml(manifest.name)
+  });
 
   const capsule = await findCapsule(realm, capsuleId);
   if (!capsule) {
@@ -488,13 +506,30 @@ app.get("/api/health", async () => ({
 }));
 
 app.get("/capsule-runtime/state.js", async (_request, reply) => {
-  const content = await readFile(capsuleStateRuntimePath, "utf8").catch(() => undefined);
+  const content = await bundleCapsuleStateRuntime();
   if (!content) {
-    return reply.code(404).send("Capsule state runtime has not been built");
+    return reply.code(404).send("Capsule state runtime could not be bundled");
   }
 
   reply.header("Content-Type", "text/javascript; charset=utf-8");
   return reply.send(content);
+});
+
+app.get("/api/capsule-events", async (request, reply) => {
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "Content-Type": "text/event-stream"
+  });
+  reply.raw.write(": connected\n\n");
+
+  const unsubscribe = capsuleDevHost.subscribe((status) => {
+    reply.raw.write(`event: capsule\ndata: ${JSON.stringify(status)}\n\n`);
+  });
+
+  request.raw.on("close", unsubscribe);
 });
 
 app.get<{ Params: { storeName: string } }>(
@@ -818,9 +853,10 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
     }
 
     try {
-      await buildCapsule(capsule.capsulePath);
+      await capsuleDevHost.rebuild(capsule);
       return {
-        built: true
+        built: true,
+        status: capsuleDevHost.readStatus(capsule)
       };
     } catch (error) {
       return reply.code(400).send({
@@ -838,7 +874,7 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
       return reply.code(404).send({ error: "Capsule not found" });
     }
     try {
-      await buildCapsule(capsule.capsulePath);
+      await capsuleDevHost.prepare(capsule);
     } catch (error) {
       return reply.code(400).send({
         error: error instanceof Error ? error.message : "Could not build capsule"
@@ -904,9 +940,51 @@ app.get<{ Params: { realmId: string; capsuleId: string; "*": string } }>(
       return reply.code(404).send("Capsule not found");
     }
 
-    const requestedPath = request.params["*"] || capsule.manifest.entry.path;
+    const requestedPath = request.params["*"] || "";
+
+    if (capsule.manifest.entry.type === "web") {
+      await capsuleDevHost.prepare(capsule);
+
+      if (!requestedPath || requestedPath === "index.html") {
+        reply.header("Content-Type", "text/html; charset=utf-8");
+        return reply.send(capsuleDevHost.renderHtml(capsule));
+      }
+
+      if (requestedPath.startsWith("__malleable__/")) {
+        const asset = capsuleDevHost.readAsset(
+          capsule,
+          requestedPath.slice("__malleable__/".length)
+        );
+        if (!asset) {
+          return reply.code(404).send("Capsule asset not found");
+        }
+
+        reply.header("Content-Type", asset.contentType);
+        return reply.send(Buffer.from(asset.contents));
+      }
+
+      if (requestedPath.startsWith("assets/")) {
+        const assetsRoot = path.join(capsule.capsulePath, "assets");
+        const resolved = path.resolve(capsule.capsulePath, requestedPath);
+        if (!resolved.startsWith(assetsRoot)) {
+          return reply.code(403).send("Outside capsule assets directory");
+        }
+
+        const content = await readFile(resolved).catch(() => undefined);
+        if (!content) {
+          return reply.code(404).send("File not found");
+        }
+
+        reply.header("Content-Type", lookupMime(resolved) || "application/octet-stream");
+        return reply.send(content);
+      }
+
+      return reply.code(404).send("File not found");
+    }
+
+    const staticRequestedPath = requestedPath || capsule.manifest.entry.path;
     const publicRoot = path.join(capsule.capsulePath, "public");
-    const resolved = path.resolve(publicRoot, requestedPath.replace(/^public[\\/]/, ""));
+    const resolved = path.resolve(publicRoot, staticRequestedPath.replace(/^public[\\/]/, ""));
 
     if (!resolved.startsWith(publicRoot)) {
       return reply.code(403).send("Outside capsule public directory");
