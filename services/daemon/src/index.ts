@@ -16,7 +16,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { lookup as lookupMime } from "mime-types";
 import { rolldown } from "rolldown";
 
-import { CapsuleDevHost } from "./capsule-dev-host.js";
+import { SharedCapsuleViteHost } from "./capsule-dev-host.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(currentDir, "../../..");
@@ -57,7 +57,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const capsuleSessions = new Map<string, CapsuleSession>();
-const capsuleDevHost = new CapsuleDevHost(workspaceRoot);
+const capsuleDevHost = new SharedCapsuleViteHost(workspaceRoot);
 
 const capsuleTemplates: Record<
   CapsuleTemplateId,
@@ -80,7 +80,7 @@ const capsuleTemplates: Record<
     entry: {
       framework: "react",
       main: "src/main.tsx",
-      reload: "prompt",
+      reload: "auto",
       type: "web"
     },
     path: path.join(templatesRoot, "web-react")
@@ -90,7 +90,7 @@ const capsuleTemplates: Record<
     entry: {
       framework: "vanilla",
       main: "src/main.ts",
-      reload: "prompt",
+      reload: "auto",
       type: "web"
     },
     path: path.join(templatesRoot, "web-vanilla")
@@ -532,6 +532,28 @@ app.get("/api/capsule-events", async (request, reply) => {
   request.raw.on("close", unsubscribe);
 });
 
+async function replyFromVite(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  reply.hijack();
+  const handled = await capsuleDevHost.handleViteRequest(request.raw, reply.raw);
+  if (!handled && !reply.raw.writableEnded) {
+    reply.raw.writeHead(404, {
+      "Content-Type": "text/plain; charset=utf-8"
+    });
+    reply.raw.end("File not found");
+  }
+}
+
+app.get("/@vite/client", replyFromVite);
+app.get("/@vite/*", replyFromVite);
+app.get("/@react-refresh", replyFromVite);
+app.get("/@id/*", replyFromVite);
+app.get("/@fs/*", replyFromVite);
+app.get("/node_modules/*", replyFromVite);
+app.get("/packages/*", replyFromVite);
+app.get("/realms/*", replyFromVite);
+app.get("/__malleable_capsule_entry__/:realmId/:capsuleId", replyFromVite);
+app.get("/__malleable_capsule_client__/:realmId/:capsuleId", replyFromVite);
+
 app.get<{ Params: { storeName: string } }>(
   "/api/capsule-state/stores/:storeName/records",
   async (request, reply) => {
@@ -845,28 +867,6 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
 );
 
 app.post<{ Params: { realmId: string; capsuleId: string } }>(
-  "/api/realms/:realmId/capsules/:capsuleId/build",
-  async (request, reply) => {
-    const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
-    if (!capsule) {
-      return reply.code(404).send({ error: "Capsule not found" });
-    }
-
-    try {
-      await capsuleDevHost.rebuild(capsule);
-      return {
-        built: true,
-        status: capsuleDevHost.readStatus(capsule)
-      };
-    } catch (error) {
-      return reply.code(400).send({
-        error: error instanceof Error ? error.message : "Could not build capsule"
-      });
-    }
-  }
-);
-
-app.post<{ Params: { realmId: string; capsuleId: string } }>(
   "/api/realms/:realmId/capsules/:capsuleId/launch",
   async (request, reply) => {
     const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
@@ -874,10 +874,10 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
       return reply.code(404).send({ error: "Capsule not found" });
     }
     try {
-      await capsuleDevHost.prepare(capsule);
+      await capsuleDevHost.activate(capsule);
     } catch (error) {
       return reply.code(400).send({
-        error: error instanceof Error ? error.message : "Could not build capsule"
+        error: error instanceof Error ? error.message : "Could not launch capsule"
       });
     }
 
@@ -943,24 +943,10 @@ app.get<{ Params: { realmId: string; capsuleId: string; "*": string } }>(
     const requestedPath = request.params["*"] || "";
 
     if (capsule.manifest.entry.type === "web") {
-      await capsuleDevHost.prepare(capsule);
-
       if (!requestedPath || requestedPath === "index.html") {
+        reply.header("Cache-Control", "no-store");
         reply.header("Content-Type", "text/html; charset=utf-8");
-        return reply.send(capsuleDevHost.renderHtml(capsule));
-      }
-
-      if (requestedPath.startsWith("__malleable__/")) {
-        const asset = capsuleDevHost.readAsset(
-          capsule,
-          requestedPath.slice("__malleable__/".length)
-        );
-        if (!asset) {
-          return reply.code(404).send("Capsule asset not found");
-        }
-
-        reply.header("Content-Type", asset.contentType);
-        return reply.send(Buffer.from(asset.contents));
+        return reply.send(await capsuleDevHost.renderHtml(capsule));
       }
 
       if (requestedPath.startsWith("assets/")) {

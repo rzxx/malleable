@@ -1,10 +1,10 @@
-import { readFile } from "node:fs/promises";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
 
 import type { CapsuleManifest } from "@malleable/capsule-schema";
-import { watch, type FSWatcher } from "chokidar";
-import { rolldown, type InputOptions, type OutputAsset, type OutputChunk } from "rolldown";
+import react from "@vitejs/plugin-react";
+import { createServer, normalizePath, type Plugin, type ViteDevServer } from "vite";
 
 export type CapsuleRuntimeRecord = {
   readonly capsulePath: string;
@@ -18,15 +18,7 @@ export type CapsuleStatus =
       readonly error?: undefined;
       readonly realmId: string;
       readonly revision: number;
-      readonly state: "building" | "dirty";
-    }
-  | {
-      readonly capsuleId: string;
-      readonly error?: undefined;
-      readonly realmId: string;
-      readonly revision: number;
-      readonly state: "ready";
-      readonly updatedAt: string;
+      readonly state: "dirty" | "ready";
     }
   | {
       readonly capsuleId: string;
@@ -37,64 +29,37 @@ export type CapsuleStatus =
       readonly updatedAt: string;
     };
 
-type BundleAsset = {
-  readonly contents: Uint8Array;
-  readonly contentType: string;
+type ActiveCapsule = {
+  readonly capsulePath: string;
+  readonly entryPath: string;
+  readonly manifest: CapsuleManifest;
+  readonly realmId: string;
 };
 
-type CapsuleBundle = {
-  readonly assets: ReadonlyMap<string, BundleAsset>;
-  readonly revision: number;
-};
-
-type WatchState = {
-  readonly watcher: FSWatcher;
-  timer: NodeJS.Timeout | undefined;
+type WebCapsuleRuntimeRecord = CapsuleRuntimeRecord & {
+  readonly manifest: CapsuleManifest & {
+    readonly entry: Extract<CapsuleManifest["entry"], { readonly type: "web" }>;
+  };
 };
 
 type StatusListener = (status: CapsuleStatus) => void;
 
 const requireFromDaemon = createRequire(import.meta.url);
-const cssModulePrefix = "\0malleable-css:";
+const entryPrefix = "/__malleable_capsule_entry__/";
+const clientPrefix = "/__malleable_capsule_client__/";
+const virtualEntryPrefix = "\0malleable-capsule-entry:";
+const virtualClientPrefix = "\0malleable-capsule-client:";
 
-function capsuleKey(capsule: CapsuleRuntimeRecord): string {
-  return `${capsule.realmId}/${capsule.manifest.id}`;
+function capsuleKey(realmId: string, capsuleId: string): string {
+  return `${realmId}/${capsuleId}`;
 }
 
-function isWebCapsule(capsule: CapsuleRuntimeRecord): boolean {
+function isWebCapsule(capsule: CapsuleRuntimeRecord): capsule is WebCapsuleRuntimeRecord {
   return capsule.manifest.entry.type === "web";
 }
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function readContentType(filePath: string): string {
-  if (filePath.endsWith(".css")) {
-    return "text/css; charset=utf-8";
-  }
-
-  if (filePath.endsWith(".js")) {
-    return "text/javascript; charset=utf-8";
-  }
-
-  if (filePath.endsWith(".svg")) {
-    return "image/svg+xml";
-  }
-
-  return "application/octet-stream";
-}
-
-function readOutputName(filePath: string): string {
-  return path.basename(filePath).replace(/^main-[A-Z0-9]+(?=\.)/i, "main");
-}
-
-function isOutputChunk(output: OutputAsset | OutputChunk): output is OutputChunk {
-  return output.type === "chunk";
-}
-
-function normalizeSlashes(filePath: string): string {
-  return filePath.replaceAll("\\", "/");
 }
 
 function normalizeWebSourcePath(capsule: CapsuleRuntimeRecord, sourcePath: string): string {
@@ -108,55 +73,47 @@ function normalizeWebSourcePath(capsule: CapsuleRuntimeRecord, sourcePath: strin
   return resolved;
 }
 
-function platformResolve(specifier: string, workspaceRoot: string): string | undefined {
-  if (specifier === "@malleable/capsule-state") {
-    return path.join(workspaceRoot, "packages", "capsule-state", "src", "index.ts");
-  }
-
-  if (
-    specifier === "react" ||
-    specifier === "react-dom" ||
-    specifier === "react-dom/client" ||
-    specifier === "react/jsx-runtime" ||
-    specifier === "react/jsx-dev-runtime"
-  ) {
-    return requireFromDaemon.resolve(specifier);
-  }
-
-  return undefined;
-}
-
-function formatBuildError(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  return "Capsule build failed";
-}
-
-function resolveCssImport(source: string, importer: string | undefined): string | undefined {
-  if (!source.endsWith(".css")) {
+function parseVirtualUrl(
+  prefix: string,
+  id: string
+): { capsuleId: string; realmId: string } | undefined {
+  if (!id.startsWith(prefix)) {
     return undefined;
   }
 
-  if (path.isAbsolute(source)) {
-    return path.resolve(source);
+  const [realmId, capsuleId] = id.slice(prefix.length).split("/");
+  if (!realmId || !capsuleId) {
+    return undefined;
   }
 
-  if (!importer) {
-    return path.resolve(source);
-  }
-
-  return path.resolve(path.dirname(importer), source);
+  return {
+    capsuleId,
+    realmId
+  };
 }
 
-export class CapsuleDevHost {
-  readonly #bundles = new Map<string, CapsuleBundle>();
+function isInside(filePath: string, rootPath: string): boolean {
+  const relative = path.relative(rootPath, filePath);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function readCapsuleForFile(
+  capsules: ReadonlyMap<string, ActiveCapsule>,
+  filePath: string
+): ActiveCapsule | undefined {
+  const resolved = path.resolve(filePath);
+  return [...capsules.values()].find((capsule) => isInside(resolved, capsule.capsulePath));
+}
+
+export class SharedCapsuleViteHost {
+  readonly #activeCapsules = new Map<string, ActiveCapsule>();
+  readonly #idleTimeoutMs = 90_000;
   readonly #listeners = new Set<StatusListener>();
   readonly #revisions = new Map<string, number>();
   readonly #statuses = new Map<string, CapsuleStatus>();
-  readonly #watchers = new Map<string, WatchState>();
   readonly #workspaceRoot: string;
+  #idleTimer: NodeJS.Timeout | undefined;
+  #vite: Promise<ViteDevServer> | undefined;
 
   constructor(workspaceRoot: string) {
     this.#workspaceRoot = workspaceRoot;
@@ -170,328 +127,266 @@ export class CapsuleDevHost {
 
     return () => {
       this.#listeners.delete(listener);
+      if (this.#listeners.size === 0) {
+        this.#closeAfterIdle();
+      }
     };
   }
 
   readStatus(capsule: CapsuleRuntimeRecord): CapsuleStatus | undefined {
-    return this.#statuses.get(capsuleKey(capsule));
+    return this.#statuses.get(capsuleKey(capsule.realmId, capsule.manifest.id));
   }
 
-  async prepare(capsule: CapsuleRuntimeRecord): Promise<void> {
+  async activate(capsule: CapsuleRuntimeRecord): Promise<void> {
     if (!isWebCapsule(capsule)) {
       return;
     }
-
-    this.#ensureWatcher(capsule);
-    if (!this.#bundles.has(capsuleKey(capsule))) {
-      await this.#build(capsule);
-    }
-  }
-
-  async rebuild(capsule: CapsuleRuntimeRecord): Promise<void> {
-    if (!isWebCapsule(capsule)) {
-      return;
-    }
-
-    this.#ensureWatcher(capsule);
-    await this.#build(capsule);
-  }
-
-  renderHtml(capsule: CapsuleRuntimeRecord): string {
-    if (capsule.manifest.entry.type !== "web") {
-      throw new Error("Cannot render native HTML for a static capsule");
-    }
-
-    const bundle = this.#bundles.get(capsuleKey(capsule));
-    const cssLink = bundle?.assets.has("main.css")
-      ? '<link rel="stylesheet" href="./__malleable__/main.css" />'
-      : "";
-
-    return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${escapeHtml(capsule.manifest.name)}</title>
-    ${cssLink}
-    <script type="module" src="./__malleable__/client.js"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="./__malleable__/main.js"></script>
-  </body>
-</html>`;
-  }
-
-  readAsset(capsule: CapsuleRuntimeRecord, assetName: string): BundleAsset | undefined {
-    if (capsule.manifest.entry.type !== "web") {
-      return undefined;
-    }
-
-    if (assetName === "client.js") {
-      return {
-        contentType: "text/javascript; charset=utf-8",
-        contents: new TextEncoder().encode(this.#renderClientScript(capsule))
-      };
-    }
-
-    return this.#bundles.get(capsuleKey(capsule))?.assets.get(assetName);
-  }
-
-  #emit(status: CapsuleStatus): void {
-    this.#statuses.set(`${status.realmId}/${status.capsuleId}`, status);
-    for (const listener of this.#listeners) {
-      listener(status);
-    }
-  }
-
-  #nextRevision(capsule: CapsuleRuntimeRecord): number {
-    const key = capsuleKey(capsule);
-    const revision = (this.#revisions.get(key) ?? 0) + 1;
-    this.#revisions.set(key, revision);
-    return revision;
-  }
-
-  #ensureWatcher(capsule: CapsuleRuntimeRecord): void {
-    const key = capsuleKey(capsule);
-    if (this.#watchers.has(key)) {
-      return;
-    }
-
-    const watcher = watch(
-      [
-        path.join(capsule.capsulePath, "capsule.json"),
-        path.join(capsule.capsulePath, "src"),
-        path.join(capsule.capsulePath, "assets")
-      ],
-      {
-        awaitWriteFinish: {
-          pollInterval: 20,
-          stabilityThreshold: 80
-        },
-        ignoreInitial: true
-      }
-    );
-    const watchState: WatchState = {
-      timer: undefined,
-      watcher
-    };
-
-    watcher.on("all", () => {
-      const revision = this.#nextRevision(capsule);
-      this.#emit({
-        capsuleId: capsule.manifest.id,
-        realmId: capsule.realmId,
-        revision,
-        state: "dirty"
-      });
-
-      if (watchState.timer) {
-        clearTimeout(watchState.timer);
-      }
-
-      watchState.timer = setTimeout(() => {
-        this.#build(capsule).catch(() => undefined);
-      }, 120);
-    });
-
-    this.#watchers.set(key, watchState);
-  }
-
-  async #build(capsule: CapsuleRuntimeRecord): Promise<void> {
-    if (capsule.manifest.entry.type !== "web") {
-      return;
-    }
-
-    const key = capsuleKey(capsule);
-    const revision = this.#nextRevision(capsule);
-    this.#emit({
-      capsuleId: capsule.manifest.id,
-      realmId: capsule.realmId,
-      revision,
-      state: "building"
-    });
 
     if (
       capsule.manifest.entry.framework === "solid" ||
       capsule.manifest.entry.framework === "svelte"
     ) {
-      const error = `${capsule.manifest.entry.framework} capsules are reserved in the manifest format, but this platform build does not include that adapter yet`;
-      this.#emit({
-        capsuleId: capsule.manifest.id,
-        error,
-        realmId: capsule.realmId,
-        revision,
-        state: "error",
-        updatedAt: new Date().toISOString()
-      });
-      throw new Error(error);
+      throw new Error(`${capsule.manifest.entry.framework} capsules need an adapter before launch`);
     }
 
-    try {
-      const entryPoint = normalizeWebSourcePath(capsule, capsule.manifest.entry.main);
-      const cssSources = new Map<string, string>();
-      const inputOptions: InputOptions = {
-        cwd: capsule.capsulePath,
-        input: entryPoint,
-        logLevel: "silent",
-        moduleTypes: {
-          ".gif": "dataurl",
-          ".jpeg": "dataurl",
-          ".jpg": "dataurl",
-          ".png": "dataurl",
-          ".svg": "dataurl",
-          ".webp": "dataurl"
-        },
-        platform: "browser",
-        plugins: [
-          {
-            name: "malleable-platform-imports",
-            resolveId: (specifier) => {
-              const resolved = platformResolve(specifier, this.#workspaceRoot);
-              return resolved ? { id: resolved } : null;
-            }
-          },
-          {
-            name: "malleable-css-imports",
-            resolveId: (specifier, importer) => {
-              const resolved = resolveCssImport(specifier, importer);
-              return resolved ? { id: `${cssModulePrefix}${normalizeSlashes(resolved)}` } : null;
-            },
-            load: async (id) => {
-              if (!id.startsWith(cssModulePrefix)) {
-                return null;
-              }
+    const key = capsuleKey(capsule.realmId, capsule.manifest.id);
+    this.#activeCapsules.set(key, {
+      capsulePath: path.resolve(capsule.capsulePath),
+      entryPath: normalizeWebSourcePath(capsule, capsule.manifest.entry.main),
+      manifest: capsule.manifest,
+      realmId: capsule.realmId
+    });
+    await this.#ensureVite();
+    this.#emitReady(capsule.realmId, capsule.manifest.id);
+  }
 
-              const cssPath = id.slice(cssModulePrefix.length);
-              cssSources.set(cssPath, await readFile(cssPath, "utf8"));
+  async renderHtml(capsule: CapsuleRuntimeRecord): Promise<string> {
+    if (capsule.manifest.entry.type !== "web") {
+      throw new Error("Cannot render native HTML for a static capsule");
+    }
 
-              return {
-                code: "",
-                moduleType: "js"
-              };
-            }
-          }
-        ],
-        resolve: {
-          conditionNames: ["browser", "import", "module", "default"]
-        },
-        transform: {
-          jsx: {
-            runtime: capsule.manifest.entry.framework === "react" ? "automatic" : "classic"
-          }
-        }
-      };
-      const bundle = await rolldown(inputOptions);
-      const generated = await bundle.generate({
-        assetFileNames: "assets/[name]-[hash][extname]",
-        dir: "out",
-        entryFileNames: "main.js",
-        format: "esm",
-        sourcemap: "inline"
+    await this.activate(capsule);
+    const server = await this.#ensureVite();
+    const capsuleBase = `/capsules/${capsule.realmId}/${capsule.manifest.id}/`;
+    const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(capsule.manifest.name)}</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="${clientPrefix}${capsule.realmId}/${capsule.manifest.id}"></script>
+    <script type="module" src="${entryPrefix}${capsule.realmId}/${capsule.manifest.id}"></script>
+  </body>
+</html>`;
+
+    return await server.transformIndexHtml(capsuleBase, html);
+  }
+
+  async handleViteRequest(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+    if (!this.#vite) {
+      return false;
+    }
+
+    const server = await this.#ensureVite();
+    return await new Promise<boolean>((resolve) => {
+      server.middlewares(request, response, () => {
+        resolve(false);
       });
-      const assets = new Map<string, BundleAsset>();
+      response.once("finish", () => {
+        resolve(true);
+      });
+    });
+  }
 
-      for (const outputFile of generated.output) {
-        if (!isOutputChunk(outputFile)) {
-          const source =
-            typeof outputFile.source === "string"
-              ? new TextEncoder().encode(outputFile.source)
-              : outputFile.source;
+  #closeAfterIdle(): void {
+    if (!this.#vite || this.#idleTimer) {
+      return;
+    }
 
-          assets.set(outputFile.fileName, {
-            contentType: readContentType(outputFile.fileName),
-            contents: source
+    this.#idleTimer = setTimeout(() => {
+      this.#activeCapsules.clear();
+      const vite = this.#vite;
+      this.#vite = undefined;
+      this.#idleTimer = undefined;
+      vite?.then((server) => server.close()).catch(() => undefined);
+    }, this.#idleTimeoutMs);
+  }
+
+  #emit(status: CapsuleStatus): void {
+    this.#statuses.set(capsuleKey(status.realmId, status.capsuleId), status);
+    for (const listener of this.#listeners) {
+      listener(status);
+    }
+  }
+
+  #emitReady(realmId: string, capsuleId: string): void {
+    const revision = this.#nextRevision(realmId, capsuleId);
+    this.#emit({
+      capsuleId,
+      realmId,
+      revision,
+      state: "ready"
+    });
+  }
+
+  #nextRevision(realmId: string, capsuleId: string): number {
+    const key = capsuleKey(realmId, capsuleId);
+    const revision = (this.#revisions.get(key) ?? 0) + 1;
+    this.#revisions.set(key, revision);
+    return revision;
+  }
+
+  async #ensureVite(): Promise<ViteDevServer> {
+    if (this.#idleTimer) {
+      clearTimeout(this.#idleTimer);
+      this.#idleTimer = undefined;
+    }
+
+    this.#vite ??= createServer({
+      appType: "custom",
+      clearScreen: false,
+      configFile: false,
+      root: this.#workspaceRoot,
+      server: {
+        fs: {
+          allow: [
+            path.join(this.#workspaceRoot, "realms"),
+            path.join(this.#workspaceRoot, "packages", "capsule-state"),
+            path.dirname(requireFromDaemon.resolve("react/package.json")),
+            path.dirname(requireFromDaemon.resolve("react-dom/package.json"))
+          ],
+          strict: true
+        },
+        hmr: {
+          host: "127.0.0.1"
+        },
+        middlewareMode: true
+      },
+      plugins: [react(), this.#capsulePlugin()],
+      resolve: {
+        alias: {
+          "@malleable/capsule-state": path.join(
+            this.#workspaceRoot,
+            "packages",
+            "capsule-state",
+            "src",
+            "index.ts"
+          )
+        },
+        dedupe: ["react", "react-dom"]
+      }
+    });
+
+    return await this.#vite;
+  }
+
+  #capsulePlugin(): Plugin {
+    return {
+      name: "malleable-capsules",
+      configureServer: (server) => {
+        server.watcher.on("change", (filePath) => {
+          const capsule = readCapsuleForFile(this.#activeCapsules, filePath);
+          if (!capsule) {
+            return;
+          }
+
+          const revision = this.#nextRevision(capsule.realmId, capsule.manifest.id);
+          this.#emit({
+            capsuleId: capsule.manifest.id,
+            realmId: capsule.realmId,
+            revision,
+            state: "dirty"
           });
-          continue;
+
+          if (path.basename(filePath) === "capsule.json") {
+            server.ws.send({
+              data: {
+                capsuleId: capsule.manifest.id,
+                realmId: capsule.realmId
+              },
+              event: "malleable:capsule-full-reload",
+              type: "custom"
+            });
+          }
+        });
+      },
+      handleHotUpdate: (context) => {
+        const capsule = readCapsuleForFile(this.#activeCapsules, context.file);
+        if (!capsule) {
+          return undefined;
         }
 
-        const name = readOutputName(outputFile.fileName);
-        assets.set(name, {
-          contentType: readContentType(name),
-          contents: new TextEncoder().encode(outputFile.code)
+        this.#emitReady(capsule.realmId, capsule.manifest.id);
+        context.server.ws.send({
+          data: {
+            capsuleId: capsule.manifest.id,
+            file: normalizePath(context.file),
+            realmId: capsule.realmId
+          },
+          event: "malleable:capsule-hmr",
+          type: "custom"
         });
-      }
 
-      if (cssSources.size > 0) {
-        const css = [...cssSources.values()].join("\n");
-        assets.set("main.css", {
-          contentType: readContentType("main.css"),
-          contents: new TextEncoder().encode(css)
-        });
-      }
+        return context.modules;
+      },
+      load: (id) => {
+        if (id.startsWith(virtualEntryPrefix)) {
+          const capsule = this.#activeCapsules.get(id.slice(virtualEntryPrefix.length));
+          if (!capsule) {
+            return null;
+          }
 
-      await bundle.close();
+          return `import ${JSON.stringify(`/@fs/${normalizePath(capsule.entryPath)}`)};`;
+        }
 
-      this.#bundles.set(key, {
-        assets,
-        revision
-      });
-      this.#emit({
-        capsuleId: capsule.manifest.id,
-        realmId: capsule.realmId,
-        revision,
-        state: "ready",
-        updatedAt: new Date().toISOString()
-      });
-    } catch (error) {
-      const message = formatBuildError(error);
-      this.#emit({
-        capsuleId: capsule.manifest.id,
-        error: message,
-        realmId: capsule.realmId,
-        revision,
-        state: "error",
-        updatedAt: new Date().toISOString()
-      });
-      throw new Error(message, { cause: error });
+        if (id.startsWith(virtualClientPrefix)) {
+          const capsule = this.#activeCapsules.get(id.slice(virtualClientPrefix.length));
+          if (!capsule) {
+            return null;
+          }
+
+          return `
+if (import.meta.hot) {
+  import.meta.hot.on("malleable:capsule-full-reload", (event) => {
+    if (event.realmId === ${JSON.stringify(capsule.realmId)} && event.capsuleId === ${JSON.stringify(capsule.manifest.id)}) {
+      location.reload();
     }
-  }
-
-  #renderClientScript(capsule: CapsuleRuntimeRecord): string {
-    const status = this.readStatus(capsule);
-    const revision = status?.revision ?? 0;
-
-    return `
-const realmId = ${JSON.stringify(capsule.realmId)};
-const capsuleId = ${JSON.stringify(capsule.manifest.id)};
-let currentRevision = ${JSON.stringify(revision)};
-
-function showReloadPrompt(message) {
-  if (document.getElementById("malleable-reload-prompt")) {
-    return;
-  }
-
-  const host = document.createElement("div");
-  host.id = "malleable-reload-prompt";
-  host.style.cssText = "position:fixed;right:14px;bottom:14px;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #9ba8a1;border-radius:8px;background:#fffef8;color:#172126;box-shadow:0 10px 30px rgba(0,0,0,.16);font:13px/1.3 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
-  const label = document.createElement("span");
-  label.textContent = message;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = "Reload";
-  button.style.cssText = "min-height:30px;border:0;border-radius:6px;padding:0 10px;background:#223238;color:#fffaf1;font:inherit;cursor:pointer;";
-  button.addEventListener("click", () => location.reload());
-  host.append(label, button);
-  document.body.append(host);
+  });
 }
-
-const events = new EventSource("/api/capsule-events");
-events.addEventListener("capsule", (event) => {
-  const status = JSON.parse(event.data);
-  if (status.realmId !== realmId || status.capsuleId !== capsuleId) {
-    return;
-  }
-
-  if (status.state === "ready" && status.revision > currentRevision) {
-    currentRevision = status.revision;
-    showReloadPrompt("Source changed");
-  }
-
-  if (status.state === "error") {
-    showReloadPrompt("Source has build errors");
-  }
-});
 `;
+        }
+
+        return null;
+      },
+      resolveId: (id) => {
+        const entry = parseVirtualUrl(entryPrefix, id);
+        if (entry) {
+          return `${virtualEntryPrefix}${capsuleKey(entry.realmId, entry.capsuleId)}`;
+        }
+
+        const client = parseVirtualUrl(clientPrefix, id);
+        if (client) {
+          return `${virtualClientPrefix}${capsuleKey(client.realmId, client.capsuleId)}`;
+        }
+
+        return null;
+      },
+      transform: (code, id) => {
+        const capsule = readCapsuleForFile(this.#activeCapsules, id);
+        if (!capsule) {
+          return null;
+        }
+
+        return code
+          .replaceAll("__MALLEABLE_CAPSULE_NAME_JSON__", JSON.stringify(capsule.manifest.name))
+          .replaceAll(
+            "__MALLEABLE_CAPSULE_DESCRIPTION_JSON__",
+            JSON.stringify(capsule.manifest.description ?? "")
+          );
+      }
+    };
   }
 }

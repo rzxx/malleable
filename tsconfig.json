@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "paths": {
+      "@malleable/capsule-schema": ["./packages/capsule-schema/src/index.ts"],
+      "@malleable/capsule-state": ["./packages/capsule-state/src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "packages/**/*.ts",
+    "realms/**/*.ts",
+    "realms/**/*.tsx",
+    "services/**/*.ts",
+    "templates/**/*.ts",
+    "templates/**/*.tsx",
+    "types/**/*.d.ts"
+  ]
+}

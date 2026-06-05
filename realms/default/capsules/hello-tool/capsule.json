@@ -7,7 +7,7 @@
     "type": "web",
     "main": "src/main.ts",
     "framework": "vanilla",
-    "reload": "prompt"
+    "reload": "auto"
   },
   "capabilities": {
     "storage": ["own-data"],

@@ -24,7 +24,7 @@ not carry `package.json`, local build scripts, or generated JS.
     "type": "web",
     "main": "src/main.tsx",
     "framework": "react",
-    "reload": "prompt"
+    "reload": "auto"
   },
   "capabilities": {
     "storage": ["own-data"],
@@ -41,6 +41,7 @@ not carry `package.json`, local build scripts, or generated JS.
 capsule/
   capsule.json
   src/
+    App.tsx
     main.tsx
     styles.css
   assets/
@@ -50,9 +51,13 @@ capsule/
 Supported `framework` values are declared by the platform catalog. The current happy path is
 `react` or `vanilla`; other adapters can be added behind the same manifest shape.
 
-The daemon watches native capsule source, rebuilds quickly, and prompts the user to reload the
-running capsule when a new good build is ready. Failed builds report diagnostics while the last
-working bundle remains available.
+The daemon serves active native capsules through one shared Vite dev host. Vite owns the watcher,
+module graph, transform cache, HMR websocket, React Refresh preamble, and module update semantics.
+React templates keep `src/main.tsx` as a bootstrap file and export the component from `src/App.tsx`
+so React Refresh can preserve component state during normal edits.
+
+Full document reload remains a fallback for unsafe HMR cases such as manifest entry changes,
+unsupported adapters, static capsules, or invalidated HMR boundaries.
 
 ## Static Capsules
 

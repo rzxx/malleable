@@ -10,7 +10,7 @@ const StaticEntrySchema = z.object({
 const WebEntrySchema = z.object({
   framework: WebFrameworkSchema.default("vanilla"),
   main: z.string().min(1),
-  reload: z.enum(["prompt", "hmr"]).default("prompt"),
+  reload: z.literal("auto").default("auto"),
   type: z.literal("web")
 });
 

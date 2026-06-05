@@ -1,14 +1,4 @@
-import {
-  Archive,
-  Code2,
-  Copy,
-  ExternalLink,
-  FolderOpen,
-  Play,
-  Plus,
-  RefreshCw,
-  Trash2
-} from "lucide-react";
+import { Archive, Code2, Copy, ExternalLink, FolderOpen, Play, Plus, Trash2 } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { z } from "zod";
@@ -30,7 +20,7 @@ const CapsuleEntrySchema = z.discriminatedUnion("type", [
   z.object({
     framework: z.enum(["vanilla", "react", "solid", "svelte"]),
     main: z.string(),
-    reload: z.enum(["prompt", "hmr"]),
+    reload: z.literal("auto"),
     type: z.literal("web")
   })
 ]);
@@ -72,7 +62,7 @@ const CapsuleStatusSchema = z.object({
   error: z.string().optional(),
   realmId: z.string(),
   revision: z.number(),
-  state: z.enum(["building", "dirty", "error", "ready"])
+  state: z.enum(["dirty", "error", "ready"])
 });
 
 const ActionPayloadSchema = z.object({
@@ -87,10 +77,15 @@ const CreateCapsulePayloadSchema = z.object({
 
 type Realm = z.infer<typeof RealmSchema>;
 type Capsule = z.infer<typeof CapsuleSchema>;
-type CapsuleStatus = z.infer<typeof CapsuleStatusSchema>;
 
 async function readJson(response: Response): Promise<unknown> {
   return await response.json();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function readRealmsPayload(value: unknown): Realm[] {
@@ -119,7 +114,6 @@ function App() {
   const [iframeNonce, setIframeNonce] = useState(0);
   const [newCapsuleDescription, setNewCapsuleDescription] = useState("");
   const [newCapsuleName, setNewCapsuleName] = useState("");
-  const [reloadNotice, setReloadNotice] = useState<CapsuleStatus>();
   const [selectedId, setSelectedId] = useState<string>();
   const [runningUrl, setRunningUrl] = useState<string>();
   const [status, setStatus] = useState("Connecting to daemon");
@@ -151,6 +145,30 @@ function App() {
     setStatus("Ready");
   }
 
+  async function loadWithRetry(signal: AbortSignal) {
+    for (let attempt = 1; attempt <= 30; attempt += 1) {
+      try {
+        await load();
+        return;
+      } catch (error) {
+        if (signal.aborted) {
+          return;
+        }
+
+        setStatus(
+          attempt === 1
+            ? "Waiting for daemon"
+            : error instanceof Error
+              ? `Waiting for daemon - ${error.message}`
+              : "Waiting for daemon"
+        );
+        await delay(Math.min(500 + attempt * 150, 2_000));
+      }
+    }
+
+    setStatus("Daemon unavailable");
+  }
+
   async function launch(capsule: Capsule) {
     setStatus(`Launching ${capsule.manifest.name}`);
     const response = await fetch(
@@ -159,7 +177,6 @@ function App() {
     );
     setRunningUrl(readLaunchPayload(await readJson(response)));
     setIframeNonce((current) => current + 1);
-    setReloadNotice(undefined);
     setStatus("Running");
   }
 
@@ -239,7 +256,6 @@ function App() {
       ]);
       setSelectedId(capsule.manifest.id);
       setRunningUrl(undefined);
-      setReloadNotice(undefined);
       setNewCapsuleName("");
       setNewCapsuleDescription("");
       setStatus("Created");
@@ -257,7 +273,6 @@ function App() {
     ]);
     setSelectedId(fork.manifest.id);
     setRunningUrl(undefined);
-    setReloadNotice(undefined);
     setStatus("Forked");
   }
 
@@ -307,9 +322,14 @@ function App() {
   }
 
   useEffect(() => {
-    load().catch((error: unknown) => {
+    const controller = new AbortController();
+    loadWithRetry(controller.signal).catch((error: unknown) => {
       setStatus(error instanceof Error ? error.message : "Daemon unavailable");
     });
+
+    return () => {
+      controller.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -327,19 +347,17 @@ function App() {
         return;
       }
 
-      if (nextStatus.state === "dirty" || nextStatus.state === "building") {
+      if (nextStatus.state === "dirty") {
         setStatus("Capsule source changed");
         return;
       }
 
       if (nextStatus.state === "error") {
-        setReloadNotice(nextStatus);
         setStatus(nextStatus.error ?? "Capsule build failed");
         return;
       }
 
-      setReloadNotice(nextStatus);
-      setStatus("Capsule update ready");
+      setStatus("Capsule updated");
     }
 
     events.addEventListener("capsule", readStatus);
@@ -351,10 +369,6 @@ function App() {
       events.close();
     };
   }, [runningUrl]);
-
-  const shouldShowReload =
-    reloadNotice?.state === "ready" &&
-    runningUrl?.includes(`/capsules/${reloadNotice.realmId}/${reloadNotice.capsuleId}/`);
 
   return (
     <main className="shell">
@@ -431,20 +445,6 @@ function App() {
                 </span>
               </div>
               <nav className="actions" aria-label="Capsule actions">
-                {shouldShowReload ? (
-                  <button
-                    type="button"
-                    title="Reload capsule changes"
-                    onClick={() => {
-                      setIframeNonce((current) => current + 1);
-                      setReloadNotice(undefined);
-                      setStatus("Reloaded capsule");
-                    }}
-                  >
-                    <RefreshCw size={17} />
-                    Reload
-                  </button>
-                ) : null}
                 <button
                   type="button"
                   title="Launch capsule"
@@ -456,18 +456,6 @@ function App() {
                 >
                   <Play size={17} />
                   Run
-                </button>
-                <button
-                  type="button"
-                  aria-label="Refresh capsule list"
-                  title="Refresh capsule list"
-                  onClick={() => {
-                    load().catch((error: unknown) => {
-                      setStatus(error instanceof Error ? error.message : "Refresh failed");
-                    });
-                  }}
-                >
-                  <RefreshCw size={17} />
                 </button>
                 <button
                   type="button"

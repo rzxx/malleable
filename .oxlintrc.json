@@ -30,8 +30,7 @@
     "**/node_modules/**",
     "**/.dev-logs/**",
     "**/*.tsbuildinfo",
-    "realms/**/capsules/**",
-    "templates/capsules/**"
+    "templates/capsules/basic-static/**"
   ],
   "options": {
     "typeAware": true,
@@ -94,6 +93,27 @@
       "env": {
         "browser": false,
         "node": true
+      }
+    },
+    {
+      "files": ["templates/capsules/web-react/src/**/*.tsx", "realms/**/capsules/**/src/**/*.tsx"],
+      "rules": {
+        "react/only-export-components": "error"
+      }
+    },
+    {
+      "files": ["types/**/*.d.ts"],
+      "rules": {
+        "eslint/no-underscore-dangle": "off"
+      }
+    },
+    {
+      "files": ["scripts/**/*.mjs"],
+      "rules": {
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-return": "off"
       }
     }
   ]
