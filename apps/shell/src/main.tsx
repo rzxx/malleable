@@ -519,7 +519,7 @@ function App() {
                     key={iframeNonce}
                     title="Running capsule"
                     src={runningUrl}
-                    sandbox="allow-forms allow-modals allow-popups allow-scripts"
+                    sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
                   />
                 ) : (
                   <div className="empty-preview">

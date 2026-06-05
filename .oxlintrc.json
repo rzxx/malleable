@@ -86,6 +86,9 @@
       "env": {
         "browser": true,
         "node": false
+      },
+      "rules": {
+        "react/iframe-missing-sandbox": "off"
       }
     },
     {

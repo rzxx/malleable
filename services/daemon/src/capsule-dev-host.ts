@@ -45,6 +45,15 @@ type WebCapsuleRuntimeRecord = CapsuleRuntimeRecord & {
 type StatusListener = (status: CapsuleStatus) => void;
 
 const requireFromDaemon = createRequire(import.meta.url);
+const reactPackageRoot = path.dirname(requireFromDaemon.resolve("react/package.json"));
+const reactDomPackageRoot = path.dirname(requireFromDaemon.resolve("react-dom/package.json"));
+const reactAliases = {
+  react: normalizePath(requireFromDaemon.resolve("react")),
+  "react-dom": normalizePath(requireFromDaemon.resolve("react-dom")),
+  "react-dom/client": normalizePath(requireFromDaemon.resolve("react-dom/client")),
+  "react/jsx-dev-runtime": normalizePath(requireFromDaemon.resolve("react/jsx-dev-runtime")),
+  "react/jsx-runtime": normalizePath(requireFromDaemon.resolve("react/jsx-runtime"))
+} as const;
 const entryPrefix = "/__malleable_capsule_entry__/";
 const clientPrefix = "/__malleable_capsule_client__/";
 const virtualEntryPrefix = "\0malleable-capsule-entry:";
@@ -103,6 +112,27 @@ function readCapsuleForFile(
 ): ActiveCapsule | undefined {
   const resolved = path.resolve(filePath);
   return [...capsules.values()].find((capsule) => isInside(resolved, capsule.capsulePath));
+}
+
+function readReactAlias(id: string): string | undefined {
+  switch (id) {
+    case "react":
+      return reactAliases.react;
+    case "react-dom":
+      return reactAliases["react-dom"];
+    case "react-dom/client":
+      return reactAliases["react-dom/client"];
+    case "react/jsx-dev-runtime":
+      return reactAliases["react/jsx-dev-runtime"];
+    case "react/jsx-runtime":
+      return reactAliases["react/jsx-runtime"];
+    default:
+      return undefined;
+  }
+}
+
+function isSourceModuleUrl(url: string): boolean {
+  return url.startsWith("/realms/") || url.startsWith("/packages/") || url.startsWith("/@fs/");
 }
 
 export class SharedCapsuleViteHost {
@@ -191,7 +221,19 @@ export class SharedCapsuleViteHost {
     }
 
     const server = await this.#ensureVite();
-    return await new Promise<boolean>((resolve) => {
+    if (request.url && isSourceModuleUrl(request.url)) {
+      const transformed = await server.transformRequest(request.url);
+      if (transformed) {
+        response.writeHead(200, {
+          "Cache-Control": "no-cache",
+          "Content-Type": "text/javascript"
+        });
+        response.end(transformed.code);
+        return true;
+      }
+    }
+
+    const handled = await new Promise<boolean>((resolve) => {
       server.middlewares(request, response, () => {
         resolve(false);
       });
@@ -199,6 +241,22 @@ export class SharedCapsuleViteHost {
         resolve(true);
       });
     });
+
+    if (handled || response.writableEnded || !request.url) {
+      return handled;
+    }
+
+    const transformed = await server.transformRequest(request.url);
+    if (!transformed) {
+      return false;
+    }
+
+    response.writeHead(200, {
+      "Cache-Control": "no-cache",
+      "Content-Type": "text/javascript"
+    });
+    response.end(transformed.code);
+    return true;
   }
 
   #closeAfterIdle(): void {
@@ -255,8 +313,8 @@ export class SharedCapsuleViteHost {
           allow: [
             path.join(this.#workspaceRoot, "realms"),
             path.join(this.#workspaceRoot, "packages", "capsule-state"),
-            path.dirname(requireFromDaemon.resolve("react/package.json")),
-            path.dirname(requireFromDaemon.resolve("react-dom/package.json"))
+            reactPackageRoot,
+            reactDomPackageRoot
           ],
           strict: true
         },
@@ -267,15 +325,34 @@ export class SharedCapsuleViteHost {
       },
       plugins: [react(), this.#capsulePlugin()],
       resolve: {
-        alias: {
-          "@malleable/capsule-state": path.join(
-            this.#workspaceRoot,
-            "packages",
-            "capsule-state",
-            "src",
-            "index.ts"
-          )
-        },
+        alias: [
+          {
+            find: "@malleable/capsule-state",
+            replacement: normalizePath(
+              path.join(this.#workspaceRoot, "packages", "capsule-state", "src", "index.ts")
+            )
+          },
+          {
+            find: "react-dom/client",
+            replacement: reactAliases["react-dom/client"]
+          },
+          {
+            find: "react/jsx-dev-runtime",
+            replacement: reactAliases["react/jsx-dev-runtime"]
+          },
+          {
+            find: "react/jsx-runtime",
+            replacement: reactAliases["react/jsx-runtime"]
+          },
+          {
+            find: "react-dom",
+            replacement: reactAliases["react-dom"]
+          },
+          {
+            find: "react",
+            replacement: reactAliases.react
+          }
+        ],
         dedupe: ["react", "react-dom"]
       }
     });
@@ -285,6 +362,7 @@ export class SharedCapsuleViteHost {
 
   #capsulePlugin(): Plugin {
     return {
+      enforce: "pre",
       name: "malleable-capsules",
       configureServer: (server) => {
         server.watcher.on("change", (filePath) => {
@@ -362,6 +440,15 @@ if (import.meta.hot) {
         return null;
       },
       resolveId: (id) => {
+        if (id === "@malleable/capsule-state") {
+          return path.join(this.#workspaceRoot, "packages", "capsule-state", "src", "index.ts");
+        }
+
+        const reactAlias = readReactAlias(id);
+        if (reactAlias) {
+          return reactAlias;
+        }
+
         const entry = parseVirtualUrl(entryPrefix, id);
         if (entry) {
           return `${virtualEntryPrefix}${capsuleKey(entry.realmId, entry.capsuleId)}`;
