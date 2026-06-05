@@ -11,6 +11,7 @@
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@malleable/capsule-schema": "workspace:*",
+    "@malleable/capsule-state": "workspace:*",
     "fastify": "^5.8.5",
     "mime-types": "^3.0.2"
   },

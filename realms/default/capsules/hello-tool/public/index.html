@@ -63,6 +63,11 @@
         cursor: pointer;
       }
 
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
       output {
         min-height: 24px;
         color: #2d6d50;
@@ -77,18 +82,9 @@
         This capsule is a real local artifact served by the daemon. Edit its files and refresh the
         shell.
       </p>
-      <button id="run">Use capsule</button>
+      <button id="action" type="button">Use capsule</button>
       <output id="result"></output>
     </main>
-    <script>
-      const button = document.querySelector("#run");
-      const result = document.querySelector("#result");
-      let count = 0;
-
-      button.addEventListener("click", () => {
-        count += 1;
-        result.textContent = `Used ${count} time${count === 1 ? "" : "s"}.`;
-      });
-    </script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>

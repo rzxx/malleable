@@ -2,3 +2,5 @@ node_modules/
 dist/
 .dev-logs/
 *.tsbuildinfo
+realms/*/capsules/*/data/
+realms/*/capsules/*/public/main.js
