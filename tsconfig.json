@@ -8,6 +8,7 @@
     "noEmit": true,
     "paths": {
       "@malleable/capsule-schema": ["./packages/capsule-schema/src/index.ts"],
+      "@malleable/capsule-system": ["./packages/capsule-system/src/index.ts"],
       "@malleable/capsule-state": ["./packages/capsule-state/src/index.ts"]
     },
     "types": ["node"]

@@ -1,4 +1,17 @@
-import { Archive, Code2, Copy, ExternalLink, FolderOpen, Play, Plus, Trash2 } from "lucide-react";
+import {
+  Archive,
+  Code2,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  Play,
+  Plus,
+  RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  X
+} from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { z } from "zod";
@@ -25,15 +38,24 @@ const CapsuleEntrySchema = z.discriminatedUnion("type", [
   })
 ]);
 
+const CapabilityRequestSchema = z.object({
+  access: z.array(z.string()),
+  command: z.string().optional(),
+  hosts: z.array(z.string()).optional(),
+  path: z.string().optional(),
+  scope: z.string()
+});
+
 const CapsuleSchema = z.object({
   capsulePath: z.string(),
   launchUrl: z.string(),
   manifest: z.object({
     capabilities: z.object({
-      commands: z.array(z.string()),
-      files: z.array(z.string()),
-      network: z.array(z.string()),
-      storage: z.array(z.string())
+      commands: z.array(CapabilityRequestSchema),
+      files: z.array(CapabilityRequestSchema),
+      network: z.array(CapabilityRequestSchema),
+      storage: z.array(CapabilityRequestSchema),
+      system: z.array(CapabilityRequestSchema)
     }),
     description: z.string().optional(),
     entry: CapsuleEntrySchema,
@@ -75,8 +97,58 @@ const CreateCapsulePayloadSchema = z.object({
   capsule: CapsuleSchema
 });
 
+const CapabilityDescriptorSchema = z.object({
+  access: z.array(z.string()),
+  autoAllow: z.boolean(),
+  capability: z.enum(["commands", "files", "network", "storage", "system"]),
+  key: z.string(),
+  label: z.string(),
+  prompt: z.enum(["ask", "auto", "explicit-trust"]),
+  risk: z.enum(["critical", "high", "low", "medium"]),
+  scope: z.record(z.string(), z.unknown())
+});
+
+const PermissionGrantSchema = z.object({
+  access: z.array(z.string()),
+  capability: z.enum(["commands", "files", "network", "storage", "system"]),
+  decision: z.enum(["allow", "deny"]),
+  id: z.string(),
+  lifetime: z.enum(["once", "session", "persistent"]),
+  manifestHash: z.string(),
+  scope: z.record(z.string(), z.unknown())
+});
+
+const PermissionEventSchema = z.object({
+  capability: z.string(),
+  decision: z.string(),
+  id: z.string(),
+  operation: z.string(),
+  reason: z.string(),
+  target: z.string(),
+  timestamp: z.string()
+});
+
+const PermissionSummarySchema = z.object({
+  diff: z.object({
+    added: z.array(z.string()),
+    existing: z.array(z.string()),
+    removed: z.array(z.string())
+  }),
+  events: z.array(PermissionEventSchema),
+  grants: z.array(PermissionGrantSchema),
+  manifestHash: z.string(),
+  requested: z.array(CapabilityDescriptorSchema),
+  trusted: z.boolean()
+});
+
+const PermissionPayloadSchema = z.object({
+  permissions: PermissionSummarySchema
+});
+
 type Realm = z.infer<typeof RealmSchema>;
 type Capsule = z.infer<typeof CapsuleSchema>;
+type CapabilityDescriptor = z.infer<typeof CapabilityDescriptorSchema>;
+type PermissionSummary = z.infer<typeof PermissionSummarySchema>;
 
 async function readJson(response: Response): Promise<unknown> {
   return await response.json();
@@ -108,6 +180,23 @@ function readActionPayload(value: unknown): void {
   ActionPayloadSchema.parse(value);
 }
 
+function readPermissionPayload(value: unknown): PermissionSummary {
+  return PermissionPayloadSchema.parse(value).permissions;
+}
+
+function scopeText(scope: Record<string, unknown>): string {
+  const suffix =
+    typeof scope.path === "string"
+      ? ` ${scope.path}`
+      : typeof scope.command === "string"
+        ? ` ${scope.command}`
+        : Array.isArray(scope.hosts)
+          ? ` ${scope.hosts.join(", ")}`
+          : "";
+
+  return `${String(scope.scope)}${suffix}`;
+}
+
 function App() {
   const [realms, setRealms] = useState<Realm[]>([]);
   const [capsules, setCapsules] = useState<Capsule[]>([]);
@@ -119,6 +208,7 @@ function App() {
   const [status, setStatus] = useState("Connecting to daemon");
   const [activeAction, setActiveAction] = useState<string>();
   const [isCreating, setIsCreating] = useState(false);
+  const [permissions, setPermissions] = useState<PermissionSummary>();
 
   const selected = useMemo(
     () => capsules.find((capsule) => capsule.manifest.id === selectedId) ?? capsules[0],
@@ -178,6 +268,100 @@ function App() {
     setRunningUrl(readLaunchPayload(await readJson(response)));
     setIframeNonce((current) => current + 1);
     setStatus("Running");
+  }
+
+  async function loadPermissions(capsule: Capsule) {
+    const response = await fetch(
+      `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions`
+    );
+    const payload = await readJson(response);
+    if (!response.ok) {
+      const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
+      throw new Error(message ?? "Permission load failed");
+    }
+
+    setPermissions(readPermissionPayload(payload));
+  }
+
+  async function updateGrant(
+    capsule: Capsule,
+    descriptor: CapabilityDescriptor,
+    lifetime: "once" | "persistent" | "session",
+    decision: "allow" | "deny" = "allow"
+  ) {
+    setActiveAction("permission");
+    setStatus("Updating permission");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants`,
+        {
+          body: JSON.stringify({
+            decision,
+            descriptorKey: descriptor.key,
+            lifetime
+          }),
+          headers: {
+            "Content-Type": "application/json"
+          },
+          method: "POST"
+        }
+      );
+      setPermissions(readPermissionPayload(await readJson(response)));
+      setStatus("Permission updated");
+    } finally {
+      setActiveAction(undefined);
+    }
+  }
+
+  async function revokeGrant(capsule: Capsule, grantId: string) {
+    setActiveAction("permission");
+    setStatus("Revoking permission");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants/${grantId}`,
+        { method: "DELETE" }
+      );
+      setPermissions(readPermissionPayload(await readJson(response)));
+      setStatus("Permission revoked");
+    } finally {
+      setActiveAction(undefined);
+    }
+  }
+
+  async function trustCapsule(capsule: Capsule, trusted: boolean) {
+    setActiveAction("permission");
+    setStatus(trusted ? "Granting trusted access" : "Removing trusted access");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/trust`,
+        {
+          body: JSON.stringify({ trusted }),
+          headers: {
+            "Content-Type": "application/json"
+          },
+          method: "POST"
+        }
+      );
+      setPermissions(readPermissionPayload(await readJson(response)));
+      setStatus(trusted ? "Trusted access granted" : "Trusted access removed");
+    } finally {
+      setActiveAction(undefined);
+    }
+  }
+
+  async function acknowledgeManifest(capsule: Capsule) {
+    setActiveAction("permission");
+    setStatus("Acknowledging manifest");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/acknowledge`,
+        { method: "POST" }
+      );
+      setPermissions(readPermissionPayload(await readJson(response)));
+      setStatus("Manifest acknowledged");
+    } finally {
+      setActiveAction(undefined);
+    }
   }
 
   async function sendCapsuleAction(
@@ -331,6 +515,18 @@ function App() {
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!selected) {
+      setPermissions(undefined);
+      return;
+    }
+
+    loadPermissions(selected).catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : "Permission load failed");
+      setPermissions(undefined);
+    });
+  }, [selected]);
 
   useEffect(() => {
     const events = new EventSource(`${apiBase}/api/capsule-events`);
@@ -531,7 +727,7 @@ function App() {
 
               <section className="inspector">
                 <div className="inspector-header">
-                  <h3>Manifest</h3>
+                  <h3>Permissions</h3>
                   {runningUrl ? (
                     <a
                       href={runningUrl}
@@ -543,7 +739,191 @@ function App() {
                     </a>
                   ) : null}
                 </div>
-                <pre>{JSON.stringify(selected.manifest, null, 2)}</pre>
+                {permissions ? (
+                  <div className="permission-panel">
+                    <section className="trust-panel">
+                      <div>
+                        <strong>Trusted local app</strong>
+                        <span>
+                          Full trust grants every declared capability for this capsule. Critical
+                          grants can read, edit, create, delete, run commands, or access secrets
+                          according to the manifest.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={Boolean(activeAction)}
+                        onClick={() => {
+                          trustCapsule(selected, !permissions.trusted).catch((error: unknown) => {
+                            setStatus(
+                              error instanceof Error ? error.message : "Trust update failed"
+                            );
+                          });
+                        }}
+                      >
+                        {permissions.trusted ? <X size={16} /> : <ShieldCheck size={16} />}
+                        {permissions.trusted ? "Remove" : "Trust"}
+                      </button>
+                    </section>
+
+                    {permissions.diff.added.length || permissions.diff.removed.length ? (
+                      <section className="permission-section">
+                        <div className="section-title">
+                          <ShieldAlert size={16} />
+                          <strong>Manifest changes</strong>
+                          <button
+                            type="button"
+                            title="Acknowledge manifest changes"
+                            disabled={Boolean(activeAction)}
+                            onClick={() => {
+                              acknowledgeManifest(selected).catch((error: unknown) => {
+                                setStatus(
+                                  error instanceof Error ? error.message : "Acknowledge failed"
+                                );
+                              });
+                            }}
+                          >
+                            <RotateCcw size={15} />
+                          </button>
+                        </div>
+                        {permissions.diff.added.map((item) => (
+                          <span className="diff added" key={`added-${item}`}>
+                            Added {item}
+                          </span>
+                        ))}
+                        {permissions.diff.removed.map((item) => (
+                          <span className="diff removed" key={`removed-${item}`}>
+                            Removed {item}
+                          </span>
+                        ))}
+                      </section>
+                    ) : null}
+
+                    <section className="permission-section">
+                      <strong>Requested grants</strong>
+                      {permissions.requested.map((descriptor) => {
+                        const granted = permissions.grants.some(
+                          (grant) =>
+                            grant.decision === "allow" &&
+                            grant.capability === descriptor.capability &&
+                            JSON.stringify(grant.scope) === JSON.stringify(descriptor.scope)
+                        );
+
+                        return (
+                          <div className="permission-row" key={descriptor.key}>
+                            <div>
+                              <strong>{descriptor.capability}</strong>
+                              <span>
+                                {scopeText(descriptor.scope)} - {descriptor.access.join("/")} -{" "}
+                                {descriptor.risk}
+                              </span>
+                            </div>
+                            <div className="permission-actions">
+                              {granted ? <span className="grant-status">Allowed</span> : null}
+                              <button
+                                type="button"
+                                disabled={Boolean(activeAction)}
+                                onClick={() => {
+                                  updateGrant(selected, descriptor, "session").catch(
+                                    (error: unknown) => {
+                                      setStatus(
+                                        error instanceof Error ? error.message : "Grant failed"
+                                      );
+                                    }
+                                  );
+                                }}
+                              >
+                                Session
+                              </button>
+                              <button
+                                type="button"
+                                disabled={Boolean(activeAction)}
+                                onClick={() => {
+                                  updateGrant(selected, descriptor, "persistent").catch(
+                                    (error: unknown) => {
+                                      setStatus(
+                                        error instanceof Error ? error.message : "Grant failed"
+                                      );
+                                    }
+                                  );
+                                }}
+                              >
+                                Always
+                              </button>
+                              <button
+                                type="button"
+                                disabled={Boolean(activeAction)}
+                                onClick={() => {
+                                  updateGrant(selected, descriptor, "persistent", "deny").catch(
+                                    (error: unknown) => {
+                                      setStatus(
+                                        error instanceof Error ? error.message : "Deny failed"
+                                      );
+                                    }
+                                  );
+                                }}
+                              >
+                                Deny
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </section>
+
+                    <section className="permission-section">
+                      <strong>Current grants</strong>
+                      {permissions.grants.length ? (
+                        permissions.grants.map((grant) => (
+                          <div className="grant-row" key={grant.id}>
+                            <span>
+                              {grant.decision} {grant.capability}.{scopeText(grant.scope)}{" "}
+                              {grant.access.join("/")} ({grant.lifetime})
+                            </span>
+                            <button
+                              type="button"
+                              title="Revoke grant"
+                              disabled={Boolean(activeAction)}
+                              onClick={() => {
+                                revokeGrant(selected, grant.id).catch((error: unknown) => {
+                                  setStatus(
+                                    error instanceof Error ? error.message : "Revoke failed"
+                                  );
+                                });
+                              }}
+                            >
+                              <X size={15} />
+                            </button>
+                          </div>
+                        ))
+                      ) : (
+                        <span className="muted">No stored grants</span>
+                      )}
+                    </section>
+
+                    <section className="permission-section">
+                      <strong>Audit log</strong>
+                      {permissions.events.length ? (
+                        permissions.events.slice(0, 12).map((event) => (
+                          <span className="audit-line" key={event.id}>
+                            {event.decision} {event.operation} {event.target} - {event.reason}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="muted">No privileged calls recorded</span>
+                      )}
+                    </section>
+
+                    <section className="permission-section">
+                      <strong>Manifest</strong>
+                      <pre>{JSON.stringify(selected.manifest, null, 2)}</pre>
+                    </section>
+                  </div>
+                ) : (
+                  <div className="permission-panel">
+                    <span className="muted">Loading permissions</span>
+                  </div>
+                )}
               </section>
             </div>
           </>

@@ -286,11 +286,147 @@ a {
   font-size: 15px;
 }
 
-.inspector pre {
+.permission-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.trust-panel,
+.permission-section {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid #d8ddd8;
+  padding-bottom: 12px;
+}
+
+.trust-panel {
+  grid-template-columns: 1fr auto;
+  align-items: start;
+}
+
+.trust-panel strong,
+.permission-section > strong,
+.permission-row strong {
+  color: #243239;
+  font-size: 13px;
+}
+
+.trust-panel span,
+.permission-row span,
+.grant-row span,
+.audit-line,
+.muted {
+  color: #5f6e6c;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.section-title button,
+.trust-panel button,
+.permission-actions button,
+.grant-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid #b5c0ba;
+  border-radius: 8px;
+  padding: 0 9px;
+  background: #fff;
+  color: #1d2b30;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.section-title button {
+  margin-left: auto;
+  min-width: 30px;
+  padding: 0;
+}
+
+.section-title button:disabled,
+.trust-panel button:disabled,
+.permission-actions button:disabled,
+.grant-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.diff {
+  border-left: 3px solid #8fa39a;
+  padding-left: 8px;
+  color: #40504e;
+  font-size: 12px;
+}
+
+.diff.added {
+  border-color: #4f8a61;
+}
+
+.diff.removed {
+  border-color: #9d5e57;
+}
+
+.permission-row,
+.grant-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.permission-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.permission-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.grant-status {
+  border: 1px solid #b7cab8;
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: #edf6ed;
+  color: #31513a;
+}
+
+.grant-row button {
+  min-width: 30px;
+  padding: 0;
+}
+
+.audit-line {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.permission-section pre {
   min-width: 0;
   margin: 0;
   overflow: auto;
   padding: 12px;
+  border: 1px solid #d8ddd8;
+  border-radius: 8px;
+  background: #fff;
   color: #2e3b40;
   font-size: 13px;
   line-height: 1.5;

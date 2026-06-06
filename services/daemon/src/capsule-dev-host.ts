@@ -312,6 +312,7 @@ export class SharedCapsuleViteHost {
         fs: {
           allow: [
             path.join(this.#workspaceRoot, "realms"),
+            path.join(this.#workspaceRoot, "packages", "capsule-system"),
             path.join(this.#workspaceRoot, "packages", "capsule-state"),
             reactPackageRoot,
             reactDomPackageRoot
@@ -326,6 +327,12 @@ export class SharedCapsuleViteHost {
       plugins: [react(), this.#capsulePlugin()],
       resolve: {
         alias: [
+          {
+            find: "@malleable/capsule-system",
+            replacement: normalizePath(
+              path.join(this.#workspaceRoot, "packages", "capsule-system", "src", "index.ts")
+            )
+          },
           {
             find: "@malleable/capsule-state",
             replacement: normalizePath(
@@ -440,6 +447,10 @@ if (import.meta.hot) {
         return null;
       },
       resolveId: (id) => {
+        if (id === "@malleable/capsule-system") {
+          return path.join(this.#workspaceRoot, "packages", "capsule-system", "src", "index.ts");
+        }
+
         if (id === "@malleable/capsule-state") {
           return path.join(this.#workspaceRoot, "packages", "capsule-state", "src", "index.ts");
         }

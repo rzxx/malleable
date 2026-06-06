@@ -10,9 +10,15 @@
     "reload": "auto"
   },
   "capabilities": {
-    "storage": ["own-data"],
+    "storage": [
+      {
+        "scope": "own-data",
+        "access": ["delete", "read", "write"]
+      }
+    ],
     "network": [],
     "commands": [],
-    "files": []
+    "files": [],
+    "system": []
   }
 }
