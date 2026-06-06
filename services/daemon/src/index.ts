@@ -12,16 +12,18 @@ import {
   type CapsuleManifest,
   type CapsuleTemplateId
 } from "@malleable/capsule-schema";
+import { openCapsuleStateDatabase } from "@malleable/capsule-state/node";
+import {
+  listCapabilityDescriptors,
+  PermissionBroker,
+  type CapabilityDescriptor
+} from "@malleable/permission-core";
+import { copyCapsuleTemplate } from "@malleable/template-core";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { lookup as lookupMime } from "mime-types";
 import { rolldown } from "rolldown";
 
 import { SharedCapsuleViteHost } from "./capsule-dev-host.js";
-import {
-  listCapabilityDescriptors,
-  PermissionPlatform,
-  type CapabilityDescriptor
-} from "./permission-platform.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(currentDir, "../../..");
@@ -66,6 +68,16 @@ type StateValueRow = {
   value: string;
 };
 
+type RuntimeLog = {
+  readonly capsuleId: string;
+  readonly id: string;
+  readonly level: string;
+  readonly message: string;
+  readonly realmId: string;
+  readonly source: string;
+  readonly timestamp: string;
+};
+
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 app.addContentTypeParser(
@@ -79,11 +91,9 @@ app.addContentTypeParser(
 
 const capsuleSessions = new Map<string, CapsuleSession>();
 const capsuleDevHost = new SharedCapsuleViteHost(workspaceRoot);
-const permissionPlatform = new PermissionPlatform(
-  path.join(platformDataRoot, "permissions.sqlite")
-);
-await permissionPlatform.open();
-permissionPlatform.database.exec(`
+const permissionBroker = new PermissionBroker(path.join(platformDataRoot, "permissions.sqlite"));
+await permissionBroker.open();
+permissionBroker.database.exec(`
   CREATE TABLE IF NOT EXISTS capsule_secrets (
     realm_id TEXT NOT NULL,
     capsule_id TEXT NOT NULL,
@@ -93,6 +103,37 @@ permissionPlatform.database.exec(`
     PRIMARY KEY (realm_id, capsule_id, key)
   );
 `);
+await mkdir(platformDataRoot, { recursive: true });
+const runtimeDatabase = new DatabaseSync(path.join(platformDataRoot, "runtime.sqlite"), {
+  timeout: 5000
+});
+runtimeDatabase.exec(`
+  CREATE TABLE IF NOT EXISTS capsule_runtime_logs (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    realm_id TEXT NOT NULL,
+    capsule_id TEXT NOT NULL,
+    level TEXT NOT NULL,
+    source TEXT NOT NULL,
+    message TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS capsule_runtime_logs_capsule
+    ON capsule_runtime_logs (realm_id, capsule_id, timestamp);
+`);
+capsuleDevHost.observe((status) => {
+  appendRuntimeLogById(
+    status.realmId,
+    status.capsuleId,
+    status.state === "error" ? "error" : "info",
+    status.state === "error"
+      ? (status.error ?? "Capsule build failed")
+      : status.state === "dirty"
+        ? "Capsule source changed"
+        : "Capsule runtime ready",
+    "vite"
+  );
+});
 
 const capsuleTemplates: Record<
   CapsuleTemplateId,
@@ -286,7 +327,7 @@ async function listCapsules(realmId: string): Promise<CapsuleRecord[]> {
           : path.join(capsulePath, manifest.entry.path),
       launchUrl: `/capsules/${realm}/${manifest.id}/`
     };
-    permissionPlatform.ensureAutoGrants(record);
+    permissionBroker.ensureAutoGrants(record);
     records.push(record);
   }
 
@@ -342,6 +383,63 @@ function readOptionalStringField(source: Record<string, unknown>, key: string): 
   }
 
   return value;
+}
+
+function appendRuntimeLogById(
+  realmId: string,
+  capsuleId: string,
+  level: "error" | "info" | "warn",
+  message: string,
+  source: string
+): void {
+  runtimeDatabase
+    .prepare(
+      `
+      INSERT INTO capsule_runtime_logs (id, timestamp, realm_id, capsule_id, level, source, message)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    )
+    .run(randomUUID(), new Date().toISOString(), realmId, capsuleId, level, source, message);
+}
+
+function appendRuntimeLog(
+  capsule: CapsuleRecord,
+  level: "error" | "info" | "warn",
+  message: string,
+  source: string
+): void {
+  appendRuntimeLogById(capsule.realmId, capsule.manifest.id, level, message, source);
+}
+
+function parseRuntimeLogRow(row: unknown): RuntimeLog {
+  if (!isJsonObject(row)) {
+    throw new Error("Invalid runtime log row");
+  }
+
+  return {
+    capsuleId: readStringField(row, "capsule_id"),
+    id: readStringField(row, "id"),
+    level: readStringField(row, "level"),
+    message: readStringField(row, "message"),
+    realmId: readStringField(row, "realm_id"),
+    source: readStringField(row, "source"),
+    timestamp: readStringField(row, "timestamp")
+  };
+}
+
+function readRuntimeLogs(capsule: CapsuleRecord, limit = 200): RuntimeLog[] {
+  return runtimeDatabase
+    .prepare(
+      `
+      SELECT id, timestamp, realm_id, capsule_id, level, source, message
+      FROM capsule_runtime_logs
+      WHERE realm_id = ? AND capsule_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `
+    )
+    .all(capsule.realmId, capsule.manifest.id, limit)
+    .map(parseRuntimeLogRow);
 }
 
 function readStringArrayField(
@@ -401,40 +499,11 @@ function serializeStoredJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-async function openStateDatabase(capsule: CapsuleRecord): Promise<DatabaseSync> {
-  const dataPath = path.join(capsule.capsulePath, "data");
-  await mkdir(dataPath, { recursive: true });
-
-  const database = new DatabaseSync(path.join(dataPath, "state.sqlite"), {
-    timeout: 5000
-  });
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS records (
-      store TEXT NOT NULL,
-      id TEXT NOT NULL,
-      value TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      revision INTEGER NOT NULL,
-      PRIMARY KEY (store, id)
-    );
-
-    CREATE TABLE IF NOT EXISTS values_store (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      revision INTEGER NOT NULL
-    );
-  `);
-
-  return database;
-}
-
 async function withStateDatabase<TValue>(
   capsule: CapsuleRecord,
   read: (database: DatabaseSync) => TValue
 ): Promise<TValue> {
-  const database = await openStateDatabase(capsule);
+  const database = await openCapsuleStateDatabase(capsule);
   try {
     return read(database);
   } finally {
@@ -500,7 +569,7 @@ async function authorizeStateRequest(
     return undefined;
   }
 
-  const resolution = permissionPlatform.resolve(capsule, {
+  const resolution = permissionBroker.resolve(capsule, {
     access: [access],
     capability: "storage",
     descriptorMatches: (descriptor) => descriptor.scope.scope === "own-data",
@@ -631,7 +700,7 @@ async function authorizeFileOperation(
     }))
     .find((candidate) => candidate.targetPath);
 
-  const resolution = permissionPlatform.resolve(capsule, {
+  const resolution = permissionBroker.resolve(capsule, {
     access: [options.access],
     capability: "files",
     descriptorMatches: candidates
@@ -706,7 +775,7 @@ async function createCapsule(realmId: string, input: unknown): Promise<CapsuleRe
     version: "0.0.1"
   };
   await mkdir(capsulesRoot, { recursive: true });
-  await cp(template.path, capsulePath, { errorOnExist: true, recursive: true });
+  await copyCapsuleTemplate(template.path, capsulePath);
   await mkdir(dataPath, { recursive: true });
 
   await writeFile(path.join(capsulePath, "capsule.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -1338,7 +1407,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/permissions/ensure", async (req
 
     const scope = readStringField(body, "scope");
     const target = `${capability}.${scope} ${access.join("/")}`;
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access,
       capability,
       descriptorMatches: (descriptor) => descriptorMatchesPermissionRequest(descriptor, body),
@@ -1502,7 +1571,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/commands/run", async (request, 
     const command = readStringField(body, "command");
     const args = readStringArrayField(body, "args") ?? [];
     const shell = body.shell === true;
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access: ["run"],
       capability: "commands",
       descriptorMatches: (descriptor) => commandDescriptorMatches(descriptor, command, shell),
@@ -1540,7 +1609,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/network/fetch", async (request,
 
     const url = new URL(readStringField(body, "url"));
     const method = readOptionalStringField(body, "method") ?? "GET";
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access: ["connect"],
       capability: "network",
       descriptorMatches: (descriptor) => networkDescriptorMatches(descriptor, url),
@@ -1587,7 +1656,7 @@ app.post<{ Body: unknown }>(
       }
 
       const url = new URL(readStringField(body, "url"));
-      const resolution = permissionPlatform.resolve(capsule, {
+      const resolution = permissionBroker.resolve(capsule, {
         access: ["run"],
         capability: "system",
         descriptorMatches: (descriptor) => descriptor.scope.scope === "open-external-url",
@@ -1626,7 +1695,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/open-path", async (reque
     }
 
     const targetPath = readStringField(body, "path");
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access: ["run"],
       capability: "system",
       descriptorMatches: (descriptor) => descriptor.scope.scope === "open-path",
@@ -1664,7 +1733,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/get", async (req
     }
 
     const key = safeStateKey(readStringField(body, "key"));
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access: ["read"],
       capability: "system",
       descriptorMatches: (descriptor) => descriptor.scope.scope === "secrets",
@@ -1676,7 +1745,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/get", async (req
     }
 
     const value = readOptionalValueRow(
-      permissionPlatform.database
+      permissionBroker.database
         .prepare(
           "SELECT value FROM capsule_secrets WHERE realm_id = ? AND capsule_id = ? AND key = ?"
         )
@@ -1706,7 +1775,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/set", async (req
 
     const key = safeStateKey(readStringField(body, "key"));
     const value = readStringField(body, "value");
-    const resolution = permissionPlatform.resolve(capsule, {
+    const resolution = permissionBroker.resolve(capsule, {
       access: ["write"],
       capability: "system",
       descriptorMatches: (descriptor) => descriptor.scope.scope === "secrets",
@@ -1717,7 +1786,7 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/set", async (req
       return sendPermissionResolutionDenied(reply, resolution.error, "system.secrets.set", key);
     }
 
-    permissionPlatform.database
+    permissionBroker.database
       .prepare(
         `
         INSERT INTO capsule_secrets (realm_id, capsule_id, key, value, updated_at)
@@ -1766,7 +1835,7 @@ app.get<{ Params: { realmId: string; capsuleId: string } }>(
     if (!capsule) {
       return reply.code(404).send({ error: "Capsule not found" });
     }
-    permissionPlatform.ensureAutoGrants(capsule);
+    permissionBroker.ensureAutoGrants(capsule);
     return { capsule };
   }
 );
@@ -1780,7 +1849,7 @@ app.get<{ Params: { realmId: string; capsuleId: string } }>(
     }
 
     return {
-      permissions: permissionPlatform.readSummary(capsule)
+      permissions: permissionBroker.readSummary(capsule)
     };
   }
 );
@@ -1799,7 +1868,7 @@ app.post<{ Body: unknown; Params: { realmId: string; capsuleId: string } }>(
         throw new Error("Grant body must be an object");
       }
 
-      const descriptor = permissionPlatform.findDescriptor(
+      const descriptor = permissionBroker.findDescriptor(
         capsule,
         readStringField(body, "descriptorKey")
       );
@@ -1817,13 +1886,13 @@ app.post<{ Body: unknown; Params: { realmId: string; capsuleId: string } }>(
         throw new Error("Grant decision is invalid");
       }
 
-      const grant = permissionPlatform.upsertGrant(capsule, descriptor, {
+      const grant = permissionBroker.upsertGrant(capsule, descriptor, {
         decision,
         lifetime
       });
       return {
         grant,
-        permissions: permissionPlatform.readSummary(capsule)
+        permissions: permissionBroker.readSummary(capsule)
       };
     } catch (error) {
       return reply.code(400).send({
@@ -1848,13 +1917,13 @@ app.post<{ Body: unknown; Params: { realmId: string; capsuleId: string } }>(
       }
 
       const trusted = body.trusted === true;
-      permissionPlatform.setTrusted(capsule, trusted);
+      permissionBroker.setTrusted(capsule, trusted);
       if (trusted) {
-        permissionPlatform.grantAllDeclared(capsule, "persistent");
+        permissionBroker.grantAllDeclared(capsule, "persistent");
       }
 
       return {
-        permissions: permissionPlatform.readSummary(capsule)
+        permissions: permissionBroker.readSummary(capsule)
       };
     } catch (error) {
       return reply.code(400).send({
@@ -1872,9 +1941,9 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
       return reply.code(404).send({ error: "Capsule not found" });
     }
 
-    permissionPlatform.acknowledgeManifest(capsule);
+    permissionBroker.acknowledgeManifest(capsule);
     return {
-      permissions: permissionPlatform.readSummary(capsule)
+      permissions: permissionBroker.readSummary(capsule)
     };
   }
 );
@@ -1887,9 +1956,9 @@ app.delete<{ Params: { capsuleId: string; grantId: string; realmId: string } }>(
       return reply.code(404).send({ error: "Capsule not found" });
     }
 
-    permissionPlatform.revokeGrant(request.params.grantId);
+    permissionBroker.revokeGrant(request.params.grantId);
     return {
-      permissions: permissionPlatform.readSummary(capsule)
+      permissions: permissionBroker.readSummary(capsule)
     };
   }
 );
@@ -1915,8 +1984,15 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
       return reply.code(404).send({ error: "Capsule not found" });
     }
     try {
+      appendRuntimeLog(capsule, "info", "Launch requested", "daemon");
       await capsuleDevHost.activate(capsule);
     } catch (error) {
+      appendRuntimeLog(
+        capsule,
+        "error",
+        error instanceof Error ? error.message : "Could not launch capsule",
+        "daemon"
+      );
       return reply.code(400).send({
         error: error instanceof Error ? error.message : "Could not launch capsule"
       });
@@ -1926,6 +2002,20 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
     return {
       status: "running",
       url: `http://127.0.0.1:${port}${capsule.launchUrl}#malleableToken=${encodeURIComponent(token)}`
+    };
+  }
+);
+
+app.get<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/logs",
+  async (request, reply) => {
+    const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
+    if (!capsule) {
+      return reply.code(404).send({ error: "Capsule not found" });
+    }
+
+    return {
+      logs: readRuntimeLogs(capsule)
     };
   }
 );
@@ -1958,6 +2048,7 @@ app.delete<{ Params: { realmId: string; capsuleId: string } }>(
     }
 
     capsuleDevHost.deactivate(capsule);
+    appendRuntimeLog(capsule, "info", "Capsule runtime stopped", "daemon");
     return {
       id: capsule.manifest.id,
       realm: capsule.realmId,

@@ -5,8 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseCapsuleManifest, type CapsuleManifest } from "@malleable/capsule-schema";
-
-import { PermissionPlatform } from "../src/permission-platform.js";
+import { PermissionBroker } from "@malleable/permission-core";
 
 function manifest(
   capabilities: CapsuleManifest["capabilities"] = {
@@ -36,15 +35,15 @@ function manifest(
   });
 }
 
-async function withPlatform(run: (platform: PermissionPlatform, root: string) => Promise<void>) {
+async function withBroker(run: (broker: PermissionBroker, root: string) => Promise<void>) {
   const root = await mkdtemp(path.join(tmpdir(), "malleable-permissions-"));
-  const platform = new PermissionPlatform(path.join(root, "permissions.sqlite"));
-  await platform.open();
+  const broker = new PermissionBroker(path.join(root, "permissions.sqlite"));
+  await broker.open();
 
   try {
-    await run(platform, root);
+    await run(broker, root);
   } finally {
-    platform.close();
+    broker.close();
     await rm(root, {
       force: true,
       recursive: true
@@ -77,14 +76,14 @@ await test("manifest capabilities require structured request shapes", () => {
 });
 
 await test("low-risk own-data storage is auto-granted and audited", async () => {
-  await withPlatform(async (platform, root) => {
+  await withBroker(async (broker, root) => {
     const subject = {
       capsulePath: root,
       manifest: manifest(),
       realmId: "default"
     };
 
-    const resolution = platform.resolve(subject, {
+    const resolution = broker.resolve(subject, {
       access: ["read"],
       capability: "storage",
       descriptorMatches: (descriptor) => descriptor.scope.scope === "own-data",
@@ -93,13 +92,13 @@ await test("low-risk own-data storage is auto-granted and audited", async () => 
     });
 
     assert.equal(resolution.isOk(), true);
-    assert.equal(platform.readGrants(subject).length, 1);
-    assert.equal(platform.readEvents(subject)[0]?.decision, "allow");
+    assert.equal(broker.readGrants(subject).length, 1);
+    assert.equal(broker.readEvents(subject)[0]?.decision, "allow");
   });
 });
 
 await test("high-risk file access requires an explicit grant", async () => {
-  await withPlatform(async (platform, root) => {
+  await withBroker(async (broker, root) => {
     const subject = {
       capsulePath: root,
       manifest: manifest({
@@ -118,7 +117,7 @@ await test("high-risk file access requires an explicit grant", async () => {
       realmId: "default"
     };
 
-    const denied = platform.resolve(subject, {
+    const denied = broker.resolve(subject, {
       access: ["read"],
       capability: "files",
       descriptorMatches: (descriptor) => descriptor.scope.scope === "explicit-path",
@@ -128,14 +127,14 @@ await test("high-risk file access requires an explicit grant", async () => {
     assert.equal(denied.isErr(), true);
     assert.match(denied.isErr() ? denied.error.reason : "", /not been granted|explicit trust/);
 
-    const descriptor = platform.readSummary(subject).requested[0];
+    const descriptor = broker.readSummary(subject).requested[0];
     assert.ok(descriptor);
-    platform.upsertGrant(subject, descriptor, {
+    broker.upsertGrant(subject, descriptor, {
       decision: "allow",
       lifetime: "persistent"
     });
 
-    const allowed = platform.resolve(subject, {
+    const allowed = broker.resolve(subject, {
       access: ["read"],
       capability: "files",
       descriptorMatches: (candidate) => candidate.key === descriptor.key,
@@ -147,7 +146,7 @@ await test("high-risk file access requires an explicit grant", async () => {
 });
 
 await test("once grants are consumed after a successful operation", async () => {
-  await withPlatform(async (platform, root) => {
+  await withBroker(async (broker, root) => {
     const subject = {
       capsulePath: root,
       manifest: manifest({
@@ -165,21 +164,21 @@ await test("once grants are consumed after a successful operation", async () => 
       }),
       realmId: "default"
     };
-    const descriptor = platform.readSummary(subject).requested[0];
+    const descriptor = broker.readSummary(subject).requested[0];
     assert.ok(descriptor);
-    platform.upsertGrant(subject, descriptor, {
+    broker.upsertGrant(subject, descriptor, {
       decision: "allow",
       lifetime: "once"
     });
 
-    const first = platform.resolve(subject, {
+    const first = broker.resolve(subject, {
       access: ["run"],
       capability: "commands",
       descriptorMatches: (candidate) => candidate.key === descriptor.key,
       operation: "commands.run",
       target: "git status"
     });
-    const second = platform.resolve(subject, {
+    const second = broker.resolve(subject, {
       access: ["run"],
       capability: "commands",
       descriptorMatches: (candidate) => candidate.key === descriptor.key,
@@ -193,13 +192,13 @@ await test("once grants are consumed after a successful operation", async () => 
 });
 
 await test("manifest diffs show newly requested and removed capabilities", async () => {
-  await withPlatform(async (platform, root) => {
+  await withBroker(async (broker, root) => {
     const subject = {
       capsulePath: root,
       manifest: manifest(),
       realmId: "default"
     };
-    platform.readSummary(subject);
+    broker.readSummary(subject);
 
     const updated = {
       ...subject,
@@ -217,7 +216,7 @@ await test("manifest diffs show newly requested and removed capabilities", async
         system: []
       })
     };
-    const summary = platform.readSummary(updated);
+    const summary = broker.readSummary(updated);
 
     assert.equal(summary.diff.added.length, 1);
     assert.match(summary.diff.added[0] ?? "", /commands.named-command git run/);

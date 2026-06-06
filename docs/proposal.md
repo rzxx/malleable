@@ -54,11 +54,11 @@ The first versions may run on an ordinary development machine. Later versions ca
 
 The core shape:
 
-- **Web shell:** the main user surface for apps, files, agents, jobs, realms, and system state.
-- **Local daemon:** the bridge to storage, process execution, permissions, app registry, system capabilities, and agent runtimes.
+- **Shell:** the main user surface for capsules, files, agents, jobs, realms, and runtime state.
+- **Daemon:** the local runtime service for storage, process execution, launches, logs, permissions, and capsule-system APIs.
 - **Capsules:** small self-contained apps, tools, workflows, automations, and documents with manifests, source, storage, and declared capabilities.
 - **Realms:** separate personal contexts such as work, experiments, entertainment, research, or any other world the user wants to keep distinct.
-- **Agent workbench:** the place where tools are created, inspected, repaired, forked, and changed while remaining ordinary files.
+- **Workbench:** the integration layer between external AI agents/tools and Malleable capsules. It is not a separate app runtime; it is where agents create, inspect, repair, fork, and change capsules while the artifacts remain ordinary files.
 
 This is enough to prove the idea. Anything beyond this must earn its place by improving the loop.
 
@@ -186,7 +186,7 @@ Preferred language:
 - web-native local OS
 - capsule
 - realm
-- workbench
+- workbench integration layer
 - generated local tool
 
 The idea is not that AI controls the computer. The idea is that the computer becomes a better place to make software with agents.

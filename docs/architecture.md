@@ -4,11 +4,13 @@ Malleable starts as a local operating environment, not a bootable OS.
 
 ## Pieces
 
-- **Shell**: web UI for realms, capsules, running tools, and source.
-- **Daemon**: local HTTP service for files, registry, launches, logs, and capabilities.
+- **Shell**: web UI for realms, capsules, running tools, source, and permissions.
+- **Daemon**: local runtime service for files, registry, launches, logs, and capsule-system APIs.
 - **Capsules**: small local tools with a manifest, source/assets, storage, and declared access.
 - **Realms**: directories that keep contexts separate.
-- **Workbench**: future agent surface for creating and mutating capsules.
+- **Permission Broker**: daemon-owned grant store and resolver for privileged capsule operations.
+- **Workbench**: integration layer between external AI agents/tools and capsules. The workbench creates,
+  inspects, repairs, forks, and mutates capsule files; it does not replace the shell or daemon.
 - **Capsule Dev Host**: one daemon-owned Vite dev server that serves every active native web
   capsule through virtual entries and shared HMR machinery.
 
@@ -24,7 +26,7 @@ Anything that does not shorten or clarify that loop waits.
 
 ## Capsule Runtime Rule
 
-Capsules own source, assets, data, and manifest. Malleable owns the build host, platform imports,
+Capsules own source, assets, data, and manifest. Malleable owns the build host, runtime imports,
 framework adapters, and automatic reload.
 
 Static capsules stay available for legacy and advanced direct-public-file cases, but the default

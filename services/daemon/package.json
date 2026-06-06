@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --conditions=development --exclude ../../apps/**/dist/** --exclude ../../packages/**/dist/** src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "tsx --conditions=development --test test/capability-platform.test.ts",
+    "test": "tsx --conditions=development --test test/permission-broker.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -14,13 +14,15 @@
     "@malleable/capsule-schema": "workspace:*",
     "@malleable/capsule-state": "workspace:*",
     "@malleable/capsule-system": "workspace:*",
+    "@malleable/permission-core": "workspace:*",
+    "@malleable/template-core": "workspace:*",
     "@vitejs/plugin-react": "^6.0.2",
     "better-result": "^2.9.2",
     "fastify": "^5.8.5",
     "mime-types": "^3.0.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "rolldown": "^1.1.0",
+    "rolldown": "1.0.3",
     "vite": "^8.0.16"
   },
   "devDependencies": {

@@ -1,21 +1,22 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import {
-  capabilityRegistry,
   parseCapsuleManifest,
   parseCreateCapsuleInput,
-  type CapabilityFamily,
   type CapsuleManifest,
-  type CapsuleTemplateId,
-  type GrantDecision,
-  type GrantLifetime
+  type CapsuleTemplateId
 } from "@malleable/capsule-schema";
+import { openCapsuleStateDatabase } from "@malleable/capsule-state/node";
+import {
+  findCapabilityDescriptors,
+  stableJson,
+  type CapabilityDescriptor
+} from "@malleable/permission-core";
+import { copyCapsuleTemplate } from "@malleable/template-core";
 
 type CapsuleRecord = {
   readonly capsulePath: string;
@@ -23,27 +24,6 @@ type CapsuleRecord = {
   readonly manifest: CapsuleManifest;
   readonly realmId: string;
   readonly sourcePath: string;
-};
-
-type CapabilityDescriptor = {
-  readonly access: readonly string[];
-  readonly autoAllow: boolean;
-  readonly capability: CapabilityFamily;
-  readonly key: string;
-  readonly label: string;
-  readonly prompt: "ask" | "auto" | "explicit-trust";
-  readonly risk: "critical" | "high" | "low" | "medium";
-  readonly scope: Readonly<Record<string, unknown>>;
-};
-
-type PermissionGrant = {
-  readonly access: readonly string[];
-  readonly capability: CapabilityFamily;
-  readonly decision: GrantDecision;
-  readonly id: string;
-  readonly lifetime: GrantLifetime;
-  readonly manifestHash: string;
-  readonly scope: Readonly<Record<string, unknown>>;
 };
 
 type CliOptions = {
@@ -59,7 +39,6 @@ const templatesRoot = path.join(workspaceRoot, "templates", "capsules");
 const platformDataRoot = path.join(workspaceRoot, ".malleable");
 const daemonPort = Number(process.env.DAEMON_PORT ?? 4877);
 const daemonBase = `http://127.0.0.1:${daemonPort}`;
-const permissionFamilies = ["commands", "files", "network", "storage", "system"] as const;
 
 const capsuleTemplates: Record<
   CapsuleTemplateId,
@@ -190,49 +169,6 @@ function readNumberField(source: unknown, key: string): number {
   return value;
 }
 
-function readOptionalIdRow(row: unknown): { readonly id: string } | undefined {
-  if (!isJsonRecord(row)) {
-    return undefined;
-  }
-
-  const id = row.id;
-  return typeof id === "string" ? { id } : undefined;
-}
-
-function readStringArrayJson(value: string): string[] {
-  const parsed = JSON.parse(value) as unknown;
-  return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
-}
-
-function readCapabilityFamily(value: string): CapabilityFamily {
-  switch (value) {
-    case "commands":
-    case "files":
-    case "network":
-    case "storage":
-    case "system":
-      return value;
-    default:
-      throw new Error(`Invalid capability family: ${value}`);
-  }
-}
-
-function readGrantDecision(value: string): GrantDecision {
-  if (value !== "allow" && value !== "deny") {
-    throw new Error(`Invalid grant decision: ${value}`);
-  }
-
-  return value;
-}
-
-function readGrantLifetime(value: string): GrantLifetime {
-  if (value !== "once" && value !== "session" && value !== "persistent") {
-    throw new Error(`Invalid grant lifetime: ${value}`);
-  }
-
-  return value;
-}
-
 function readTemplateId(value: string | undefined): CapsuleTemplateId {
   const candidate = value ?? "web-react";
   switch (candidate) {
@@ -260,87 +196,6 @@ function timestampSegment(): string {
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value)
-      .toSorted(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
-      .join(",")}}`;
-  }
-
-  return JSON.stringify(value);
-}
-
-function manifestCapabilityHash(manifest: CapsuleManifest): string {
-  return createHash("sha256").update(stableJson(manifest.capabilities)).digest("hex");
-}
-
-function descriptorKey(
-  capability: CapabilityFamily,
-  scope: Readonly<Record<string, unknown>>,
-  access: readonly string[]
-): string {
-  return `${capability}:${stableJson(scope)}:${stableJson([...access].toSorted())}`;
-}
-
-function scopeLabel(scope: Readonly<Record<string, unknown>>): string {
-  const base = String(scope.scope);
-  if (typeof scope.path === "string") {
-    return `${base} ${scope.path}`;
-  }
-  if (typeof scope.command === "string") {
-    return `${base} ${scope.command}`;
-  }
-  if (Array.isArray(scope.hosts)) {
-    return `${base} ${scope.hosts.join(", ")}`;
-  }
-  return base;
-}
-
-function listCapabilityDescriptors(manifest: CapsuleManifest): CapabilityDescriptor[] {
-  return permissionFamilies.flatMap((family) =>
-    manifest.capabilities[family].map((request) => {
-      const source = request as {
-        readonly access: readonly string[];
-        readonly scope: string;
-      } & Record<string, unknown>;
-      const registryEntry = (
-        capabilityRegistry[family] as Readonly<
-          Record<
-            string,
-            {
-              readonly autoAllow: boolean;
-              readonly prompt: "ask" | "auto" | "explicit-trust";
-              readonly risk: "critical" | "high" | "low" | "medium";
-            }
-          >
-        >
-      )[source.scope];
-      if (!registryEntry) {
-        throw new Error(`Unknown capability request: ${family}.${source.scope}`);
-      }
-
-      const scope = Object.fromEntries(Object.entries(source).filter(([key]) => key !== "access"));
-      const access = [...new Set(source.access)].toSorted();
-
-      return {
-        access,
-        autoAllow: registryEntry.autoAllow,
-        capability: family,
-        key: descriptorKey(family, scope, access),
-        label: `${family}.${scopeLabel(scope)} ${access.join("/")}`,
-        prompt: registryEntry.prompt,
-        risk: registryEntry.risk,
-        scope
-      };
-    })
-  );
 }
 
 async function readManifest(capsulePath: string): Promise<CapsuleManifest> {
@@ -556,7 +411,7 @@ async function createCapsule(
   };
 
   await mkdir(capsulesRoot, { recursive: true });
-  await cp(template.path, capsulePath, { errorOnExist: true, recursive: true });
+  await copyCapsuleTemplate(template.path, capsulePath);
   await mkdir(dataPath, { recursive: true });
   await writeFile(path.join(capsulePath, "capsule.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   await rewriteTemplatePlaceholders(capsulePath, {
@@ -571,7 +426,6 @@ async function createCapsule(
     if (cap !== "own-data") {
       throw new Error(`Capability must be declared in capsule.json before granting: ${cap}`);
     }
-    grantCapability(capsule, cap, "persistent", "allow");
   }
 
   return capsule;
@@ -700,307 +554,117 @@ async function toAgentCapsule(capsule: CapsuleRecord, options: { includeManifest
   };
 }
 
-function openPermissionsDatabase(): DatabaseSync {
-  const databasePath = path.join(platformDataRoot, "permissions.sqlite");
-  const database = new DatabaseSync(databasePath, { timeout: 5000 });
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS permission_grants (
-      id TEXT PRIMARY KEY,
-      realm_id TEXT NOT NULL,
-      capsule_id TEXT NOT NULL,
-      capsule_path TEXT NOT NULL,
-      capability TEXT NOT NULL,
-      scope_json TEXT NOT NULL,
-      access_json TEXT NOT NULL,
-      decision TEXT NOT NULL,
-      lifetime TEXT NOT NULL,
-      manifest_hash TEXT NOT NULL,
-      granted_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      last_used_at TEXT
-    );
+function readPermissionsResponse(payload: unknown): Record<string, unknown> {
+  if (!isJsonRecord(payload) || !isJsonRecord(payload.permissions)) {
+    throw new Error("Daemon did not return a permission summary");
+  }
 
-    CREATE INDEX IF NOT EXISTS permission_grants_capsule
-      ON permission_grants (realm_id, capsule_id);
-
-    CREATE TABLE IF NOT EXISTS permission_events (
-      id TEXT PRIMARY KEY,
-      timestamp TEXT NOT NULL,
-      realm_id TEXT NOT NULL,
-      capsule_id TEXT NOT NULL,
-      capability TEXT NOT NULL,
-      operation TEXT NOT NULL,
-      target TEXT NOT NULL,
-      decision TEXT NOT NULL,
-      reason TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS permission_events_capsule
-      ON permission_events (realm_id, capsule_id, timestamp);
-
-    CREATE TABLE IF NOT EXISTS permission_manifest_snapshots (
-      realm_id TEXT NOT NULL,
-      capsule_id TEXT NOT NULL,
-      manifest_hash TEXT NOT NULL,
-      requested_json TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (realm_id, capsule_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS trusted_capsules (
-      realm_id TEXT NOT NULL,
-      capsule_id TEXT NOT NULL,
-      trusted_at TEXT NOT NULL,
-      PRIMARY KEY (realm_id, capsule_id)
-    );
-  `);
-  return database;
+  return payload.permissions;
 }
 
-function readJsonObject(value: string): Record<string, unknown> {
-  const parsed = JSON.parse(value) as unknown;
-  return isJsonRecord(parsed) ? parsed : {};
+async function readPermissionSummary(capsule: CapsuleRecord): Promise<Record<string, unknown>> {
+  const payload = await daemonJson(
+    `/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions`
+  );
+  if (!payload) {
+    throw new Error("Daemon is not running; permission commands require the permission broker");
+  }
+
+  return readPermissionsResponse(payload);
 }
 
-function readGrants(database: DatabaseSync, capsule: CapsuleRecord): PermissionGrant[] {
-  return database
-    .prepare(
-      `
-      SELECT id, capability, scope_json, access_json, decision, lifetime, manifest_hash
-      FROM permission_grants
-      WHERE realm_id = ? AND capsule_id = ?
-      ORDER BY updated_at DESC
-    `
-    )
-    .all(capsule.realmId, capsule.manifest.id)
-    .map((row) => {
-      const capability = readCapabilityFamily(readStringField(row, "capability"));
-      return {
-        access: readStringArrayJson(readStringField(row, "access_json")),
-        capability,
-        decision: readGrantDecision(readStringField(row, "decision")),
-        id: readStringField(row, "id"),
-        lifetime: readGrantLifetime(readStringField(row, "lifetime")),
-        manifestHash: readStringField(row, "manifest_hash"),
-        scope: readJsonObject(readStringField(row, "scope_json"))
-      };
-    });
+async function readRuntimeLogs(capsule: CapsuleRecord): Promise<unknown> {
+  const payload = await daemonJson(
+    `/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/logs`
+  );
+  if (!payload) {
+    throw new Error("Daemon is not running; runtime logs require the daemon");
+  }
+
+  return isJsonRecord(payload) && "logs" in payload ? payload.logs : payload;
 }
 
-function readPermissionEvents(database: DatabaseSync, capsule: CapsuleRecord) {
-  return database
-    .prepare(
-      `
-      SELECT id, timestamp, realm_id, capsule_id, capability, operation, target, decision, reason
-      FROM permission_events
-      WHERE realm_id = ? AND capsule_id = ?
-      ORDER BY timestamp DESC
-      LIMIT 80
-    `
-    )
-    .all(capsule.realmId, capsule.manifest.id);
+function readGrantRows(summary: Record<string, unknown>): Record<string, unknown>[] {
+  const grants = summary.grants;
+  return Array.isArray(grants) && grants.every(isJsonRecord) ? grants : [];
 }
 
-function upsertGrant(
-  database: DatabaseSync,
-  capsule: CapsuleRecord,
-  descriptor: CapabilityDescriptor,
-  lifetime: GrantLifetime,
-  decision: GrantDecision
-): PermissionGrant {
-  const now = new Date().toISOString();
-  const manifestHash = manifestCapabilityHash(capsule.manifest);
-  const existingRow = database
-    .prepare(
-      `
-      SELECT id
-      FROM permission_grants
-      WHERE realm_id = ? AND capsule_id = ? AND capability = ? AND scope_json = ?
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `
-    )
-    .get(capsule.realmId, capsule.manifest.id, descriptor.capability, stableJson(descriptor.scope));
-  const existing = readOptionalIdRow(existingRow);
-  const grantId = existing?.id ?? randomUUID();
-
-  database
-    .prepare(
-      `
-      INSERT INTO permission_grants (
-        id, realm_id, capsule_id, capsule_path, capability, scope_json, access_json,
-        decision, lifetime, manifest_hash, granted_at, updated_at, last_used_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-      ON CONFLICT(id) DO UPDATE SET
-        capsule_path = excluded.capsule_path,
-        access_json = excluded.access_json,
-        decision = excluded.decision,
-        lifetime = excluded.lifetime,
-        manifest_hash = excluded.manifest_hash,
-        updated_at = excluded.updated_at
-    `
-    )
-    .run(
-      grantId,
-      capsule.realmId,
-      capsule.manifest.id,
-      capsule.capsulePath,
-      descriptor.capability,
-      stableJson(descriptor.scope),
-      stableJson(descriptor.access),
-      decision,
-      lifetime,
-      manifestHash,
-      now,
-      now
-    );
-
-  database
-    .prepare(
-      `
-      INSERT INTO permission_manifest_snapshots (
-        realm_id, capsule_id, manifest_hash, requested_json, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(realm_id, capsule_id) DO UPDATE SET
-        manifest_hash = excluded.manifest_hash,
-        requested_json = excluded.requested_json,
-        updated_at = excluded.updated_at
-    `
-    )
-    .run(
-      capsule.realmId,
-      capsule.manifest.id,
-      manifestHash,
-      stableJson(listCapabilityDescriptors(capsule.manifest)),
-      now
-    );
-
-  return {
-    access: descriptor.access,
-    capability: descriptor.capability,
-    decision,
-    id: grantId,
-    lifetime,
-    manifestHash,
-    scope: descriptor.scope
-  };
-}
-
-function findCapabilityDescriptors(
-  capsule: CapsuleRecord,
-  capability: string
-): CapabilityDescriptor[] {
-  const normalized = capability.includes(".") ? capability : capability.replace(/^cap:/, "");
-  return listCapabilityDescriptors(capsule.manifest).filter(
-    (descriptor) =>
-      descriptor.key === capability ||
-      descriptor.label === capability ||
-      descriptor.capability === normalized ||
-      descriptor.scope.scope === normalized ||
-      `${descriptor.capability}.${String(descriptor.scope.scope)}` === normalized
+function grantMatchesDescriptor(
+  grant: Record<string, unknown>,
+  descriptor: CapabilityDescriptor
+): boolean {
+  return (
+    grant.capability === descriptor.capability &&
+    isJsonRecord(grant.scope) &&
+    stableJson(grant.scope) === stableJson(descriptor.scope)
   );
 }
 
-function grantCapability(
+async function grantCapability(
   capsule: CapsuleRecord,
-  capability: string,
-  lifetime: GrantLifetime,
-  decision: GrantDecision
-) {
-  const descriptors = findCapabilityDescriptors(capsule, capability);
+  capability: string
+): Promise<readonly unknown[]> {
+  const descriptors = findCapabilityDescriptors(capsule.manifest, capability);
   if (descriptors.length === 0) {
     throw new Error(`Capability is not declared in capsule.json: ${capability}`);
   }
 
-  const database = openPermissionsDatabase();
-  try {
-    return descriptors.map((descriptor) =>
-      upsertGrant(database, capsule, descriptor, lifetime, decision)
+  const grants: unknown[] = [];
+  for (const descriptor of descriptors) {
+    const payload = await daemonJson(
+      `/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants`,
+      {
+        body: JSON.stringify({
+          decision: "allow",
+          descriptorKey: descriptor.key,
+          lifetime: "persistent"
+        }),
+        headers: {
+          "Content-Type": "application/json"
+        },
+        method: "POST"
+      }
     );
-  } finally {
-    database.close();
-  }
-}
-
-function revokeCapability(capsule: CapsuleRecord, capability: string) {
-  const database = openPermissionsDatabase();
-  try {
-    const descriptors = findCapabilityDescriptors(capsule, capability);
-    if (descriptors.length === 0) {
-      const result = database.prepare("DELETE FROM permission_grants WHERE id = ?").run(capability);
-      return { revoked: result.changes };
+    if (!payload) {
+      throw new Error("Daemon is not running; permission commands require the permission broker");
     }
 
-    let revoked = 0;
-    for (const descriptor of descriptors) {
-      const result = database
-        .prepare(
-          "DELETE FROM permission_grants WHERE realm_id = ? AND capsule_id = ? AND capability = ? AND scope_json = ?"
-        )
-        .run(
-          capsule.realmId,
-          capsule.manifest.id,
-          descriptor.capability,
-          stableJson(descriptor.scope)
-        );
-      revoked += Number(result.changes);
+    if (isJsonRecord(payload) && "grant" in payload) {
+      grants.push(payload.grant);
     }
-
-    return { revoked };
-  } finally {
-    database.close();
   }
+
+  return grants;
 }
 
-function readPermissionSummary(capsule: CapsuleRecord) {
-  const database = openPermissionsDatabase();
-  try {
-    const requested = listCapabilityDescriptors(capsule.manifest);
-    return {
-      events: readPermissionEvents(database, capsule),
-      grants: readGrants(database, capsule),
-      manifestHash: manifestCapabilityHash(capsule.manifest),
-      requested,
-      trusted: Boolean(
-        database
-          .prepare("SELECT trusted_at FROM trusted_capsules WHERE realm_id = ? AND capsule_id = ?")
-          .get(capsule.realmId, capsule.manifest.id)
-      )
-    };
-  } finally {
-    database.close();
+async function revokeCapability(capsule: CapsuleRecord, capability: string) {
+  const descriptors = findCapabilityDescriptors(capsule.manifest, capability);
+  const grantIds =
+    descriptors.length === 0
+      ? [capability]
+      : readGrantRows(await readPermissionSummary(capsule))
+          .filter((grant) =>
+            descriptors.some((descriptor) => grantMatchesDescriptor(grant, descriptor))
+          )
+          .map((grant) => readStringField(grant, "id"));
+
+  let revoked = 0;
+  for (const grantId of grantIds) {
+    const payload = await daemonJson(
+      `/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants/${grantId}`,
+      { method: "DELETE" }
+    );
+    if (!payload) {
+      throw new Error("Daemon is not running; permission commands require the permission broker");
+    }
+    revoked += 1;
   }
-}
 
-async function openStateDatabase(capsule: CapsuleRecord): Promise<DatabaseSync> {
-  const dataPath = path.join(capsule.capsulePath, "data");
-  await mkdir(dataPath, { recursive: true });
-  const database = new DatabaseSync(path.join(dataPath, "state.sqlite"), { timeout: 5000 });
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS records (
-      store TEXT NOT NULL,
-      id TEXT NOT NULL,
-      value TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      revision INTEGER NOT NULL,
-      PRIMARY KEY (store, id)
-    );
-
-    CREATE TABLE IF NOT EXISTS values_store (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      revision INTEGER NOT NULL
-    );
-  `);
-  return database;
+  return { revoked };
 }
 
 async function readState(capsule: CapsuleRecord, key?: string) {
-  const database = await openStateDatabase(capsule);
+  const database = await openCapsuleStateDatabase(capsule);
   try {
     if (key) {
       const row = database
@@ -1033,7 +697,7 @@ async function readState(capsule: CapsuleRecord, key?: string) {
 }
 
 async function setState(capsule: CapsuleRecord, key: string, rawValue: string) {
-  const database = await openStateDatabase(capsule);
+  const database = await openCapsuleStateDatabase(capsule);
   try {
     const parsed = parseJsonValue(rawValue);
     const now = new Date().toISOString();
@@ -1057,7 +721,7 @@ async function setState(capsule: CapsuleRecord, key: string, rawValue: string) {
 }
 
 async function exportState(capsule: CapsuleRecord) {
-  const database = await openStateDatabase(capsule);
+  const database = await openCapsuleStateDatabase(capsule);
   try {
     const records = database
       .prepare("SELECT store, id, value, revision, updated_at FROM records")
@@ -1408,31 +1072,28 @@ async function commandCapsule(options: CliOptions) {
       if (!id) {
         throw new Error("Usage: malleable capsule permissions <id>");
       }
-      print(readPermissionSummary(await resolveCapsule(id, realm)), options);
+      print(await readPermissionSummary(await resolveCapsule(id, realm)), options);
       return;
     }
     case "grant": {
       if (!id || !extra) {
         throw new Error("Usage: malleable capsule grant <id> <capability>");
       }
-      print(
-        { grants: grantCapability(await resolveCapsule(id, realm), extra, "persistent", "allow") },
-        options
-      );
+      print({ grants: await grantCapability(await resolveCapsule(id, realm), extra) }, options);
       return;
     }
     case "revoke": {
       if (!id || !extra) {
         throw new Error("Usage: malleable capsule revoke <id> <capability>");
       }
-      print(revokeCapability(await resolveCapsule(id, realm), extra), options);
+      print(await revokeCapability(await resolveCapsule(id, realm), extra), options);
       return;
     }
     case "logs": {
       if (!id) {
         throw new Error("Usage: malleable capsule logs <id>");
       }
-      print(readPermissionSummary(await resolveCapsule(id, realm)).events, options);
+      print(await readRuntimeLogs(await resolveCapsule(id, realm)), options);
       return;
     }
     case "snapshot": {

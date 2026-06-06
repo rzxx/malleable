@@ -10,7 +10,26 @@ import {
 } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { z } from "zod";
+
+import {
+  acknowledgeManifestChanges,
+  apiBase,
+  launchCapsule,
+  openCapsuleSource,
+  parseCapsuleStatusEvent,
+  readCapsules,
+  readPermissions,
+  readRealms,
+  setCapsuleTrust,
+  updatePermissionGrant,
+  type CapabilityDescriptor,
+  type Capsule,
+  type PermissionDecision,
+  type PermissionGrant,
+  type PermissionLifetime,
+  type PermissionSummary,
+  type Realm
+} from "./api.js";
 
 import "./styles.css";
 
@@ -18,143 +37,10 @@ declare global {
   var malleableShellRoot: Root | undefined;
 }
 
-const apiBase = "http://127.0.0.1:4877";
-
-const RealmSchema = z.object({
-  id: z.string(),
-  path: z.string()
-});
-
-const CapsuleEntrySchema = z.discriminatedUnion("type", [
-  z.object({
-    path: z.string(),
-    type: z.literal("static")
-  }),
-  z.object({
-    framework: z.enum(["vanilla", "react", "solid", "svelte"]),
-    main: z.string(),
-    reload: z.literal("auto"),
-    type: z.literal("web")
-  })
-]);
-
-const CapabilityRequestSchema = z.object({
-  access: z.array(z.string()),
-  command: z.string().optional(),
-  hosts: z.array(z.string()).optional(),
-  path: z.string().optional(),
-  scope: z.string()
-});
-
-const CapsuleSchema = z.object({
-  capsulePath: z.string(),
-  launchUrl: z.string(),
-  manifest: z.object({
-    capabilities: z.object({
-      commands: z.array(CapabilityRequestSchema),
-      files: z.array(CapabilityRequestSchema),
-      network: z.array(CapabilityRequestSchema),
-      storage: z.array(CapabilityRequestSchema),
-      system: z.array(CapabilityRequestSchema)
-    }),
-    description: z.string().optional(),
-    entry: CapsuleEntrySchema,
-    id: z.string(),
-    name: z.string(),
-    version: z.string()
-  }),
-  realmId: z.string(),
-  sourcePath: z.string()
-});
-
-const RealmsPayloadSchema = z.object({
-  realms: z.array(RealmSchema)
-});
-
-const CapsulesPayloadSchema = z.object({
-  capsules: z.array(CapsuleSchema)
-});
-
-const LaunchPayloadSchema = z.object({
-  url: z.string()
-});
-
-const CapsuleStatusSchema = z.object({
-  capsuleId: z.string(),
-  error: z.string().optional(),
-  realmId: z.string(),
-  revision: z.number(),
-  state: z.enum(["dirty", "error", "ready"])
-});
-
-const CapabilityDescriptorSchema = z.object({
-  access: z.array(z.string()),
-  autoAllow: z.boolean(),
-  capability: z.enum(["commands", "files", "network", "storage", "system"]),
-  key: z.string(),
-  label: z.string(),
-  prompt: z.enum(["ask", "auto", "explicit-trust"]),
-  risk: z.enum(["critical", "high", "low", "medium"]),
-  scope: z.record(z.string(), z.unknown())
-});
-
-const PermissionGrantSchema = z.object({
-  access: z.array(z.string()),
-  capability: z.enum(["commands", "files", "network", "storage", "system"]),
-  decision: z.enum(["allow", "deny"]),
-  id: z.string(),
-  lifetime: z.enum(["once", "session", "persistent"]),
-  manifestHash: z.string(),
-  scope: z.record(z.string(), z.unknown())
-});
-
-const PermissionSummarySchema = z.object({
-  diff: z.object({
-    added: z.array(z.string()),
-    existing: z.array(z.string()),
-    removed: z.array(z.string())
-  }),
-  events: z.array(z.unknown()),
-  grants: z.array(PermissionGrantSchema),
-  manifestHash: z.string(),
-  requested: z.array(CapabilityDescriptorSchema),
-  trusted: z.boolean()
-});
-
-const PermissionPayloadSchema = z.object({
-  permissions: PermissionSummarySchema
-});
-
-type Realm = z.infer<typeof RealmSchema>;
-type Capsule = z.infer<typeof CapsuleSchema>;
-type CapabilityDescriptor = z.infer<typeof CapabilityDescriptorSchema>;
-type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
-type PermissionSummary = z.infer<typeof PermissionSummarySchema>;
-
-async function readJson(response: Response): Promise<unknown> {
-  return await response.json();
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function readRealmsPayload(value: unknown): Realm[] {
-  return RealmsPayloadSchema.parse(value).realms;
-}
-
-function readCapsulesPayload(value: unknown): Capsule[] {
-  return CapsulesPayloadSchema.parse(value).capsules;
-}
-
-function readLaunchPayload(value: unknown): string {
-  return LaunchPayloadSchema.parse(value).url;
-}
-
-function readPermissionPayload(value: unknown): PermissionSummary {
-  return PermissionPayloadSchema.parse(value).permissions;
 }
 
 function scopeText(scope: Record<string, unknown>): string {
@@ -182,11 +68,17 @@ function App() {
   const [realms, setRealms] = useState<Realm[]>([]);
   const [capsules, setCapsules] = useState<Capsule[]>([]);
   const [iframeNonce, setIframeNonce] = useState(0);
+  const [selectedRealmId, setSelectedRealmId] = useState<string>();
   const [selectedId, setSelectedId] = useState<string>();
   const [runningUrl, setRunningUrl] = useState<string>();
   const [status, setStatus] = useState("Connecting to daemon");
   const [activeAction, setActiveAction] = useState<string>();
   const [permissions, setPermissions] = useState<PermissionSummary>();
+
+  const selectedRealm = useMemo(
+    () => realms.find((realm) => realm.id === selectedRealmId),
+    [realms, selectedRealmId]
+  );
 
   const selected = useMemo(
     () => capsules.find((capsule) => capsule.manifest.id === selectedId) ?? capsules[0],
@@ -210,30 +102,41 @@ function App() {
     (pendingDescriptors.length || permissions.diff.added.length || permissions.diff.removed.length)
   );
 
-  async function load() {
-    setStatus("Loading realm");
-    const realmResponse = await fetch(`${apiBase}/api/realms`);
-    const realmsData = readRealmsPayload(await readJson(realmResponse));
+  async function loadRealmsFromDaemon() {
+    setStatus("Loading realms");
+    const realmsData = await readRealms();
     setRealms(realmsData);
 
-    const realm = realmsData[0];
-    if (!realm) {
+    if (!realmsData.length) {
       setCapsules([]);
+      setSelectedRealmId(undefined);
       setStatus("No realms found");
       return;
     }
 
-    const capsuleResponse = await fetch(`${apiBase}/api/realms/${realm.id}/capsules`);
-    const capsulesData = readCapsulesPayload(await readJson(capsuleResponse));
+    setSelectedRealmId((current) =>
+      current && realmsData.some((realm) => realm.id === current) ? current : realmsData[0]?.id
+    );
+  }
+
+  async function loadCapsulesForRealm(realmId: string) {
+    setStatus(`Loading ${realmId}`);
+    setRunningUrl(undefined);
+    setPermissions(undefined);
+    const capsulesData = await readCapsules(realmId);
     setCapsules(capsulesData);
-    setSelectedId((current) => current ?? capsulesData[0]?.manifest.id);
+    setSelectedId((current) =>
+      current && capsulesData.some((capsule) => capsule.manifest.id === current)
+        ? current
+        : capsulesData[0]?.manifest.id
+    );
     setStatus("Ready");
   }
 
   async function loadWithRetry(signal: AbortSignal) {
     for (let attempt = 1; attempt <= 30; attempt += 1) {
       try {
-        await load();
+        await loadRealmsFromDaemon();
         return;
       } catch (error) {
         if (signal.aborted) {
@@ -256,52 +159,25 @@ function App() {
 
   async function launch(capsule: Capsule) {
     setStatus(`Launching ${capsule.manifest.name}`);
-    const response = await fetch(
-      `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/launch`,
-      { method: "POST" }
-    );
-    setRunningUrl(readLaunchPayload(await readJson(response)));
+    setRunningUrl(await launchCapsule(capsule));
     setIframeNonce((current) => current + 1);
     setStatus("Running");
   }
 
   async function loadPermissions(capsule: Capsule) {
-    const response = await fetch(
-      `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions`
-    );
-    const payload = await readJson(response);
-    if (!response.ok) {
-      const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
-      throw new Error(message ?? "Permission load failed");
-    }
-
-    setPermissions(readPermissionPayload(payload));
+    setPermissions(await readPermissions(capsule));
   }
 
   async function updateGrant(
     capsule: Capsule,
     descriptor: CapabilityDescriptor,
-    lifetime: "persistent" | "session",
-    decision: "allow" | "deny" = "allow"
+    lifetime: PermissionLifetime,
+    decision: PermissionDecision = "allow"
   ) {
     setActiveAction("permission");
     setStatus("Updating permission");
     try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants`,
-        {
-          body: JSON.stringify({
-            decision,
-            descriptorKey: descriptor.key,
-            lifetime
-          }),
-          headers: {
-            "Content-Type": "application/json"
-          },
-          method: "POST"
-        }
-      );
-      setPermissions(readPermissionPayload(await readJson(response)));
+      setPermissions(await updatePermissionGrant(capsule, descriptor, lifetime, decision));
       setStatus("Permission updated");
     } finally {
       setActiveAction(undefined);
@@ -312,17 +188,7 @@ function App() {
     setActiveAction("permission");
     setStatus(trusted ? "Granting trusted access" : "Removing trusted access");
     try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/trust`,
-        {
-          body: JSON.stringify({ trusted }),
-          headers: {
-            "Content-Type": "application/json"
-          },
-          method: "POST"
-        }
-      );
-      setPermissions(readPermissionPayload(await readJson(response)));
+      setPermissions(await setCapsuleTrust(capsule, trusted));
       setStatus(trusted ? "Trusted access granted" : "Trusted access removed");
     } finally {
       setActiveAction(undefined);
@@ -333,11 +199,7 @@ function App() {
     setActiveAction("permission");
     setStatus("Acknowledging manifest");
     try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/acknowledge`,
-        { method: "POST" }
-      );
-      setPermissions(readPermissionPayload(await readJson(response)));
+      setPermissions(await acknowledgeManifestChanges(capsule));
       setStatus("Manifest acknowledged");
     } finally {
       setActiveAction(undefined);
@@ -348,15 +210,7 @@ function App() {
     setActiveAction("source/open");
     setStatus("Opening source");
     try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/source/open`,
-        { method: "POST" }
-      );
-      const payload = await readJson(response);
-      if (!response.ok) {
-        const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
-        throw new Error(message ?? "Open source failed");
-      }
+      await openCapsuleSource(capsule);
       setStatus("Source opened");
     } finally {
       setActiveAction(undefined);
@@ -375,6 +229,18 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!selectedRealmId) {
+      return;
+    }
+
+    loadCapsulesForRealm(selectedRealmId).catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : "Capsule load failed");
+      setCapsules([]);
+      setSelectedId(undefined);
+    });
+  }, [selectedRealmId]);
+
+  useEffect(() => {
     if (!selected) {
       setPermissions(undefined);
       return;
@@ -390,12 +256,11 @@ function App() {
     const events = new EventSource(`${apiBase}/api/capsule-events`);
 
     function readStatus(event: MessageEvent<string>) {
-      const parsed = CapsuleStatusSchema.safeParse(JSON.parse(event.data) as unknown);
-      if (!parsed.success) {
+      const nextStatus = parseCapsuleStatusEvent(event.data);
+      if (!nextStatus) {
         return;
       }
 
-      const nextStatus = parsed.data;
       const capsuleUrl = `/capsules/${nextStatus.realmId}/${nextStatus.capsuleId}/`;
       if (!runningUrl?.includes(capsuleUrl)) {
         return;
@@ -437,7 +302,24 @@ function App() {
 
         <section className="realm-strip">
           <span>Realm</span>
-          <strong>{realms[0]?.id ?? "none"}</strong>
+          <ul className="realm-options" aria-label="Available realms">
+            {realms.length ? (
+              realms.map((realm) => (
+                <li key={realm.id}>
+                  <button
+                    className={realm.id === selectedRealm?.id ? "realm active" : "realm"}
+                    type="button"
+                    title={realm.path}
+                    onClick={() => setSelectedRealmId(realm.id)}
+                  >
+                    {realm.id}
+                  </button>
+                </li>
+              ))
+            ) : (
+              <strong>none</strong>
+            )}
+          </ul>
         </section>
 
         <section className="capsule-list" aria-label="Capsules">
@@ -496,6 +378,9 @@ function App() {
             <div className={hasPermissionWork ? "content-grid" : "content-grid no-inspector"}>
               <section className="preview">
                 {runningUrl ? (
+                  /* The daemon serves capsule launch URLs today. `allow-same-origin` keeps those
+                     capsules usable, but it also means a future cookie-authenticated daemon API
+                     would be reachable from the frame. TODO: move launches to an isolated origin. */
                   <iframe
                     key={iframeNonce}
                     title="Running capsule"

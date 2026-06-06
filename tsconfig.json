@@ -10,7 +10,10 @@
       "@malleable/cli": ["./apps/cli/src/index.ts"],
       "@malleable/capsule-schema": ["./packages/capsule-schema/src/index.ts"],
       "@malleable/capsule-system": ["./packages/capsule-system/src/index.ts"],
-      "@malleable/capsule-state": ["./packages/capsule-state/src/index.ts"]
+      "@malleable/capsule-state": ["./packages/capsule-state/src/index.ts"],
+      "@malleable/capsule-state/node": ["./packages/capsule-state/src/node.ts"],
+      "@malleable/permission-core": ["./packages/permission-core/src/index.ts"],
+      "@malleable/template-core": ["./packages/template-core/src/index.ts"]
     },
     "types": ["node"]
   },

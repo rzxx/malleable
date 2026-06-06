@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const WebFrameworkSchema = z.enum(["vanilla", "react", "solid", "svelte"]);
+const WebFrameworkSchema = z.enum(["vanilla", "react"]);
 const StorageScopeSchema = z.enum(["own-data", "realm-data", "shared-data"]);
 const FilesScopeSchema = z.enum([
   "own-data",

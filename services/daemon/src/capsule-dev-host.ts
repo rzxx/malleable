@@ -139,6 +139,7 @@ export class SharedCapsuleViteHost {
   readonly #activeCapsules = new Map<string, ActiveCapsule>();
   readonly #idleTimeoutMs = 90_000;
   readonly #listeners = new Set<StatusListener>();
+  readonly #observers = new Set<StatusListener>();
   readonly #revisions = new Map<string, number>();
   readonly #statuses = new Map<string, CapsuleStatus>();
   readonly #workspaceRoot: string;
@@ -163,6 +164,17 @@ export class SharedCapsuleViteHost {
     };
   }
 
+  observe(listener: StatusListener): () => void {
+    this.#observers.add(listener);
+    for (const status of this.#statuses.values()) {
+      listener(status);
+    }
+
+    return () => {
+      this.#observers.delete(listener);
+    };
+  }
+
   readStatus(capsule: CapsuleRuntimeRecord): CapsuleStatus | undefined {
     return this.#statuses.get(capsuleKey(capsule.realmId, capsule.manifest.id));
   }
@@ -170,13 +182,6 @@ export class SharedCapsuleViteHost {
   async activate(capsule: CapsuleRuntimeRecord): Promise<void> {
     if (!isWebCapsule(capsule)) {
       return;
-    }
-
-    if (
-      capsule.manifest.entry.framework === "solid" ||
-      capsule.manifest.entry.framework === "svelte"
-    ) {
-      throw new Error(`${capsule.manifest.entry.framework} capsules need an adapter before launch`);
     }
 
     const key = capsuleKey(capsule.realmId, capsule.manifest.id);
@@ -285,6 +290,9 @@ export class SharedCapsuleViteHost {
     this.#statuses.set(capsuleKey(status.realmId, status.capsuleId), status);
     for (const listener of this.#listeners) {
       listener(status);
+    }
+    for (const observer of this.#observers) {
+      observer(status);
     }
   }
 

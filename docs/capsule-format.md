@@ -48,8 +48,8 @@ capsule/
   data/
 ```
 
-Supported `framework` values are declared by the platform catalog. The current happy path is
-`react` or `vanilla`; other adapters can be added behind the same manifest shape.
+Supported `framework` values are `react` and `vanilla`. Other adapters should not be added to the
+schema until the daemon can launch them.
 
 The daemon serves active native capsules through one shared Vite dev host. Vite owns the watcher,
 module graph, transform cache, HMR websocket, React Refresh preamble, and module update semantics.

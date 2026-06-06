@@ -5,8 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   capabilityRegistry,
-  type CapabilityRegistryEntry,
   type CapabilityFamily,
+  type CapabilityRegistryEntry,
   type CapsuleManifest,
   type GrantDecision,
   type GrantLifetime,
@@ -62,6 +62,7 @@ export type PermissionResolution = Result<
 >;
 
 const permissionFamilies = ["commands", "files", "network", "storage", "system"] as const;
+
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -75,7 +76,7 @@ function readStringValue(source: Record<string, unknown>, key: string): string {
   return value;
 }
 
-function readGrantDecision(value: string): GrantDecision {
+export function readGrantDecision(value: string): GrantDecision {
   if (value !== "allow" && value !== "deny") {
     throw new Error(`Invalid grant decision: ${value}`);
   }
@@ -83,7 +84,7 @@ function readGrantDecision(value: string): GrantDecision {
   return value;
 }
 
-function readGrantLifetime(value: string): GrantLifetime {
+export function readGrantLifetime(value: string): GrantLifetime {
   if (value !== "once" && value !== "session" && value !== "persistent") {
     throw new Error(`Invalid grant lifetime: ${value}`);
   }
@@ -91,7 +92,7 @@ function readGrantLifetime(value: string): GrantLifetime {
   return value;
 }
 
-function readCapabilityFamily(value: string): CapabilityFamily {
+export function readCapabilityFamily(value: string): CapabilityFamily {
   switch (value) {
     case "commands":
     case "files":
@@ -112,7 +113,7 @@ function readRegistryEntry(
   return entries[scope];
 }
 
-function stableJson(value: unknown): string {
+export function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableJson).join(",")}]`;
   }
@@ -131,7 +132,7 @@ export function manifestCapabilityHash(manifest: CapsuleManifest): string {
   return createHash("sha256").update(stableJson(manifest.capabilities)).digest("hex");
 }
 
-function descriptorKey(
+export function descriptorKey(
   capability: CapabilityFamily,
   scope: Readonly<Record<string, unknown>>,
   access: readonly string[]
@@ -186,6 +187,21 @@ export function listCapabilityDescriptors(manifest: CapsuleManifest): Capability
     manifest.capabilities[family].map((request) =>
       createDescriptor(family, request as { access: readonly string[]; scope: string })
     )
+  );
+}
+
+export function findCapabilityDescriptors(
+  manifest: CapsuleManifest,
+  capability: string
+): CapabilityDescriptor[] {
+  const normalized = capability.includes(".") ? capability : capability.replace(/^cap:/, "");
+  return listCapabilityDescriptors(manifest).filter(
+    (descriptor) =>
+      descriptor.key === capability ||
+      descriptor.label === capability ||
+      descriptor.capability === normalized ||
+      descriptor.scope.scope === normalized ||
+      `${descriptor.capability}.${String(descriptor.scope.scope)}` === normalized
   );
 }
 
@@ -340,7 +356,67 @@ function isDeniedGrant(grant: PermissionGrant, descriptor: CapabilityDescriptor)
   );
 }
 
-export class PermissionPlatform {
+export async function openPermissionDatabase(databasePath: string): Promise<DatabaseSync> {
+  await mkdir(path.dirname(databasePath), { recursive: true });
+  const database = new DatabaseSync(databasePath, {
+    timeout: 5000
+  });
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS permission_grants (
+      id TEXT PRIMARY KEY,
+      realm_id TEXT NOT NULL,
+      capsule_id TEXT NOT NULL,
+      capsule_path TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      scope_json TEXT NOT NULL,
+      access_json TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      lifetime TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      granted_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_used_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS permission_grants_capsule
+      ON permission_grants (realm_id, capsule_id);
+
+    CREATE TABLE IF NOT EXISTS permission_events (
+      id TEXT PRIMARY KEY,
+      timestamp TEXT NOT NULL,
+      realm_id TEXT NOT NULL,
+      capsule_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      target TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reason TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS permission_events_capsule
+      ON permission_events (realm_id, capsule_id, timestamp);
+
+    CREATE TABLE IF NOT EXISTS permission_manifest_snapshots (
+      realm_id TEXT NOT NULL,
+      capsule_id TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      requested_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (realm_id, capsule_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS trusted_capsules (
+      realm_id TEXT NOT NULL,
+      capsule_id TEXT NOT NULL,
+      trusted_at TEXT NOT NULL,
+      PRIMARY KEY (realm_id, capsule_id)
+    );
+  `);
+
+  return database;
+}
+
+export class PermissionBroker {
   readonly #databasePath: string;
   #database: DatabaseSync | undefined;
 
@@ -349,61 +425,7 @@ export class PermissionPlatform {
   }
 
   async open(): Promise<void> {
-    await mkdir(path.dirname(this.#databasePath), { recursive: true });
-    this.#database = new DatabaseSync(this.#databasePath, {
-      timeout: 5000
-    });
-    this.#database.exec(`
-      CREATE TABLE IF NOT EXISTS permission_grants (
-        id TEXT PRIMARY KEY,
-        realm_id TEXT NOT NULL,
-        capsule_id TEXT NOT NULL,
-        capsule_path TEXT NOT NULL,
-        capability TEXT NOT NULL,
-        scope_json TEXT NOT NULL,
-        access_json TEXT NOT NULL,
-        decision TEXT NOT NULL,
-        lifetime TEXT NOT NULL,
-        manifest_hash TEXT NOT NULL,
-        granted_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        last_used_at TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS permission_grants_capsule
-        ON permission_grants (realm_id, capsule_id);
-
-      CREATE TABLE IF NOT EXISTS permission_events (
-        id TEXT PRIMARY KEY,
-        timestamp TEXT NOT NULL,
-        realm_id TEXT NOT NULL,
-        capsule_id TEXT NOT NULL,
-        capability TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        target TEXT NOT NULL,
-        decision TEXT NOT NULL,
-        reason TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS permission_events_capsule
-        ON permission_events (realm_id, capsule_id, timestamp);
-
-      CREATE TABLE IF NOT EXISTS permission_manifest_snapshots (
-        realm_id TEXT NOT NULL,
-        capsule_id TEXT NOT NULL,
-        manifest_hash TEXT NOT NULL,
-        requested_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (realm_id, capsule_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS trusted_capsules (
-        realm_id TEXT NOT NULL,
-        capsule_id TEXT NOT NULL,
-        trusted_at TEXT NOT NULL,
-        PRIMARY KEY (realm_id, capsule_id)
-      );
-    `);
+    this.#database = await openPermissionDatabase(this.#databasePath);
     this.database
       .prepare("DELETE FROM permission_grants WHERE lifetime IN ('once', 'session')")
       .run();
@@ -411,7 +433,7 @@ export class PermissionPlatform {
 
   get database(): DatabaseSync {
     if (!this.#database) {
-      throw new Error("Permission platform database has not been opened");
+      throw new Error("Permission broker database has not been opened");
     }
 
     return this.#database;

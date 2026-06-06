@@ -12,7 +12,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@malleable/capsule-schema": "workspace:*"
+    "@malleable/capsule-schema": "workspace:*",
+    "@malleable/capsule-state": "workspace:*",
+    "@malleable/permission-core": "workspace:*",
+    "@malleable/template-core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

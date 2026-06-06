@@ -1,7 +1,8 @@
-# Capability Platform
+# Permission Broker And Capsule Runtime
 
 Capsules should become powerful local tools, closer to Electron-style apps than isolated web pages.
-The platform should support that without making privileged access implicit or invisible.
+The daemon and capsule-system runtime should support that without making privileged access implicit
+or invisible.
 
 The core rule:
 
@@ -32,10 +33,12 @@ The current system already has the beginning of this model:
 - `capsule.json` has `capabilities`.
 - The daemon mints launch tokens.
 - `own-data` storage is enforced server-side.
+- Grants, manifest snapshots, and permission events are stored by `@malleable/permission-core`.
+- Privileged file, command, network, and system APIs go through `@malleable/capsule-system`.
 - Capsules run inside a browser iframe sandbox.
 
-The current gap is that `network`, `commands`, and `files` are loose string arrays with no grant
-store, prompt flow, operation broker, or update diff.
+The current gap is hardening and broadening the brokered operations, not inventing a second
+permission model.
 
 ## Capability Registry
 
@@ -125,7 +128,8 @@ This is verbose, but it makes permission diffs and user prompts understandable.
 
 ## Grant Store
 
-The daemon should own a permission database outside capsule folders.
+The daemon permission broker owns a permission database outside capsule folders. The schema and
+resolver live in `@malleable/permission-core`; callers must not define their own copy.
 
 Suggested tables:
 
@@ -160,14 +164,14 @@ permission_events
 Effective permission is:
 
 ```text
-declared in manifest + granted by user + allowed by platform policy
+declared in manifest + granted by user + allowed by daemon policy
 ```
 
 If any part is missing, the daemon denies or starts a prompt flow.
 
 ## Runtime API
 
-Capsules should use a platform runtime package instead of calling privileged daemon endpoints
+Capsules should use a runtime package instead of calling privileged daemon endpoints
 directly.
 
 Example author experience:
@@ -286,7 +290,7 @@ This gives visibility without nagging on every individual operation.
 
 ## Security Boundaries
 
-The platform should not rely on renderer trust for privileged operations.
+The runtime should not rely on renderer trust for privileged operations.
 
 - Capsules can request privileged operations only through runtime APIs.
 - Daemon endpoints must authorize every privileged request.
@@ -295,7 +299,7 @@ The platform should not rely on renderer trust for privileged operations.
 - Full access grants should be treated as real trust, not fake sandbox safety.
 - All privileged operations should be loggable.
 
-The browser sandbox still matters for normal web isolation, but it is not the permission system.
+The browser sandbox still matters for normal web isolation, but it is not the permission broker.
 
 ## Implementation Order
 

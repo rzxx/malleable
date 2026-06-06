@@ -1,5 +1,5 @@
 {
-  "name": "@malleable/capsule-state",
+  "name": "@malleable/permission-core",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,11 +10,6 @@
       "types": "./src/index.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
-    },
-    "./node": {
-      "types": "./src/node.ts",
-      "development": "./src/node.ts",
-      "import": "./dist/node.js"
     }
   },
   "scripts": {
@@ -22,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@malleable/capsule-schema": "workspace:*",
     "better-result": "^2.9.2"
   },
   "devDependencies": {

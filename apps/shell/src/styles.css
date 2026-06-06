@@ -71,13 +71,37 @@ a {
 }
 
 .realm-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
   gap: 12px;
   border-top: 1px solid #3b4d53;
   border-bottom: 1px solid #3b4d53;
   padding: 12px 0;
+}
+
+.realm-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.realm {
+  min-height: 28px;
+  border: 1px solid #4d6268;
+  border-radius: 8px;
+  padding: 0 9px;
+  background: transparent;
+  color: #f4f0e8;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.realm:hover,
+.realm.active {
+  border-color: #87a09a;
+  background: #304349;
 }
 
 .capsule-list {
