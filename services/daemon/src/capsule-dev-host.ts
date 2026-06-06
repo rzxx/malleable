@@ -190,6 +190,14 @@ export class SharedCapsuleViteHost {
     this.#emitReady(capsule.realmId, capsule.manifest.id);
   }
 
+  deactivate(capsule: CapsuleRuntimeRecord): void {
+    const key = capsuleKey(capsule.realmId, capsule.manifest.id);
+    this.#activeCapsules.delete(key);
+    this.#statuses.delete(key);
+    this.#revisions.delete(key);
+    this.#closeAfterIdle();
+  }
+
   async renderHtml(capsule: CapsuleRuntimeRecord): Promise<string> {
     if (capsule.manifest.entry.type !== "web") {
       throw new Error("Cannot render native HTML for a static capsule");

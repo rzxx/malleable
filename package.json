@@ -2,9 +2,13 @@
   "name": "malleable",
   "version": "0.0.0",
   "private": true,
+  "bin": {
+    "malleable": "./apps/cli/dist/index.js"
+  },
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "malleable": "tsx --conditions=development apps/cli/src/index.ts",
     "build": "pnpm -r build",
     "check": "oxfmt --write . && oxlint . --type-aware --type-check --deny-warnings --report-unused-disable-directives && pnpm -r typecheck",
     "format": "oxfmt --write .",
@@ -18,6 +22,7 @@
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",
     "oxlint-tsgolint": "^0.23.0",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },
   "packageManager": "pnpm@10.17.1"

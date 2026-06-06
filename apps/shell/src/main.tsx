@@ -1,15 +1,11 @@
 import {
-  Archive,
   Code2,
-  Copy,
   ExternalLink,
   FolderOpen,
   Play,
-  Plus,
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
-  Trash2,
   X
 } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
@@ -91,16 +87,6 @@ const CapsuleStatusSchema = z.object({
   state: z.enum(["dirty", "error", "ready"])
 });
 
-const ActionPayloadSchema = z.object({
-  archived: z.boolean().optional(),
-  deleted: z.boolean().optional(),
-  opened: z.boolean().optional()
-});
-
-const CreateCapsulePayloadSchema = z.object({
-  capsule: CapsuleSchema
-});
-
 const CapabilityDescriptorSchema = z.object({
   access: z.array(z.string()),
   autoAllow: z.boolean(),
@@ -122,23 +108,13 @@ const PermissionGrantSchema = z.object({
   scope: z.record(z.string(), z.unknown())
 });
 
-const PermissionEventSchema = z.object({
-  capability: z.string(),
-  decision: z.string(),
-  id: z.string(),
-  operation: z.string(),
-  reason: z.string(),
-  target: z.string(),
-  timestamp: z.string()
-});
-
 const PermissionSummarySchema = z.object({
   diff: z.object({
     added: z.array(z.string()),
     existing: z.array(z.string()),
     removed: z.array(z.string())
   }),
-  events: z.array(PermissionEventSchema),
+  events: z.array(z.unknown()),
   grants: z.array(PermissionGrantSchema),
   manifestHash: z.string(),
   requested: z.array(CapabilityDescriptorSchema),
@@ -152,6 +128,7 @@ const PermissionPayloadSchema = z.object({
 type Realm = z.infer<typeof RealmSchema>;
 type Capsule = z.infer<typeof CapsuleSchema>;
 type CapabilityDescriptor = z.infer<typeof CapabilityDescriptorSchema>;
+type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
 type PermissionSummary = z.infer<typeof PermissionSummarySchema>;
 
 async function readJson(response: Response): Promise<unknown> {
@@ -176,14 +153,6 @@ function readLaunchPayload(value: unknown): string {
   return LaunchPayloadSchema.parse(value).url;
 }
 
-function readCreateCapsulePayload(value: unknown): Capsule {
-  return CreateCapsulePayloadSchema.parse(value).capsule;
-}
-
-function readActionPayload(value: unknown): void {
-  ActionPayloadSchema.parse(value);
-}
-
 function readPermissionPayload(value: unknown): PermissionSummary {
   return PermissionPayloadSchema.parse(value).permissions;
 }
@@ -201,22 +170,44 @@ function scopeText(scope: Record<string, unknown>): string {
   return `${String(scope.scope)}${suffix}`;
 }
 
+function grantMatchesDescriptor(grant: PermissionGrant, descriptor: CapabilityDescriptor): boolean {
+  return (
+    grant.decision === "allow" &&
+    grant.capability === descriptor.capability &&
+    JSON.stringify(grant.scope) === JSON.stringify(descriptor.scope)
+  );
+}
+
 function App() {
   const [realms, setRealms] = useState<Realm[]>([]);
   const [capsules, setCapsules] = useState<Capsule[]>([]);
   const [iframeNonce, setIframeNonce] = useState(0);
-  const [newCapsuleDescription, setNewCapsuleDescription] = useState("");
-  const [newCapsuleName, setNewCapsuleName] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
   const [runningUrl, setRunningUrl] = useState<string>();
   const [status, setStatus] = useState("Connecting to daemon");
   const [activeAction, setActiveAction] = useState<string>();
-  const [isCreating, setIsCreating] = useState(false);
   const [permissions, setPermissions] = useState<PermissionSummary>();
 
   const selected = useMemo(
     () => capsules.find((capsule) => capsule.manifest.id === selectedId) ?? capsules[0],
     [capsules, selectedId]
+  );
+
+  const pendingDescriptors = useMemo(() => {
+    if (!permissions) {
+      return [];
+    }
+
+    return permissions.requested.filter(
+      (descriptor) =>
+        !descriptor.autoAllow &&
+        !permissions.grants.some((grant) => grantMatchesDescriptor(grant, descriptor))
+    );
+  }, [permissions]);
+
+  const hasPermissionWork = Boolean(
+    permissions &&
+    (pendingDescriptors.length || permissions.diff.added.length || permissions.diff.removed.length)
   );
 
   async function load() {
@@ -290,7 +281,7 @@ function App() {
   async function updateGrant(
     capsule: Capsule,
     descriptor: CapabilityDescriptor,
-    lifetime: "once" | "persistent" | "session",
+    lifetime: "persistent" | "session",
     decision: "allow" | "deny" = "allow"
   ) {
     setActiveAction("permission");
@@ -312,21 +303,6 @@ function App() {
       );
       setPermissions(readPermissionPayload(await readJson(response)));
       setStatus("Permission updated");
-    } finally {
-      setActiveAction(undefined);
-    }
-  }
-
-  async function revokeGrant(capsule: Capsule, grantId: string) {
-    setActiveAction("permission");
-    setStatus("Revoking permission");
-    try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/permissions/grants/${grantId}`,
-        { method: "DELETE" }
-      );
-      setPermissions(readPermissionPayload(await readJson(response)));
-      setStatus("Permission revoked");
     } finally {
       setActiveAction(undefined);
     }
@@ -368,142 +344,20 @@ function App() {
     }
   }
 
-  async function sendCapsuleAction(
-    capsule: Capsule,
-    action: "archive" | "fork" | "source/open",
-    label: string
-  ): Promise<unknown> {
-    setActiveAction(action);
-    setStatus(label);
-
+  async function openSource(capsule: Capsule) {
+    setActiveAction("source/open");
+    setStatus("Opening source");
     try {
       const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/${action}`,
+        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}/source/open`,
         { method: "POST" }
       );
       const payload = await readJson(response);
-
       if (!response.ok) {
         const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
-        throw new Error(message ?? `${label} failed`);
+        throw new Error(message ?? "Open source failed");
       }
-
-      return payload;
-    } finally {
-      setActiveAction(undefined);
-    }
-  }
-
-  function removeCapsule(capsule: Capsule) {
-    setCapsules((current) => {
-      const remaining = current.filter((existing) => existing.manifest.id !== capsule.manifest.id);
-      setSelectedId(remaining[0]?.manifest.id);
-      return remaining;
-    });
-
-    if (runningUrl?.includes(`/capsules/${capsule.realmId}/${capsule.manifest.id}/`)) {
-      setRunningUrl(undefined);
-    }
-  }
-
-  async function createCapsule() {
-    const realm = realms[0];
-    const name = newCapsuleName.trim();
-    const description = newCapsuleDescription.trim();
-
-    if (!realm || !name || isCreating) {
-      return;
-    }
-
-    setIsCreating(true);
-    setStatus("Creating capsule");
-
-    try {
-      const response = await fetch(`${apiBase}/api/realms/${realm.id}/capsules`, {
-        body: JSON.stringify({
-          description: description || undefined,
-          name,
-          templateId: "web-react"
-        }),
-        headers: {
-          "Content-Type": "application/json"
-        },
-        method: "POST"
-      });
-
-      const payload = await readJson(response);
-      if (!response.ok) {
-        const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
-        throw new Error(message ?? "Create failed");
-      }
-
-      const capsule = readCreateCapsulePayload(payload);
-      setCapsules((current) => [
-        capsule,
-        ...current.filter((existing) => existing.manifest.id !== capsule.manifest.id)
-      ]);
-      setSelectedId(capsule.manifest.id);
-      setRunningUrl(undefined);
-      setNewCapsuleName("");
-      setNewCapsuleDescription("");
-      setStatus("Created");
-    } finally {
-      setIsCreating(false);
-    }
-  }
-
-  async function forkCapsule(capsule: Capsule) {
-    const payload = await sendCapsuleAction(capsule, "fork", "Forking capsule");
-    const fork = readCreateCapsulePayload(payload);
-    setCapsules((current) => [
-      fork,
-      ...current.filter((existing) => existing.manifest.id !== fork.manifest.id)
-    ]);
-    setSelectedId(fork.manifest.id);
-    setRunningUrl(undefined);
-    setStatus("Forked");
-  }
-
-  async function openSource(capsule: Capsule) {
-    readActionPayload(await sendCapsuleAction(capsule, "source/open", "Opening source"));
-    setStatus("Source opened");
-  }
-
-  async function archiveCapsule(capsule: Capsule) {
-    const confirmed = window.confirm(`Archive ${capsule.manifest.name}?`);
-    if (!confirmed) {
-      return;
-    }
-
-    readActionPayload(await sendCapsuleAction(capsule, "archive", "Archiving capsule"));
-    removeCapsule(capsule);
-    setStatus("Archived");
-  }
-
-  async function deleteCapsule(capsule: Capsule) {
-    const confirmed = window.confirm(`Permanently delete ${capsule.manifest.name}?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setActiveAction("delete");
-    setStatus("Deleting capsule");
-
-    try {
-      const response = await fetch(
-        `${apiBase}/api/realms/${capsule.realmId}/capsules/${capsule.manifest.id}`,
-        { method: "DELETE" }
-      );
-      const payload = await readJson(response);
-
-      if (!response.ok) {
-        const message = z.object({ error: z.string() }).safeParse(payload).data?.error;
-        throw new Error(message ?? "Delete failed");
-      }
-
-      readActionPayload(payload);
-      removeCapsule(capsule);
-      setStatus("Deleted");
+      setStatus("Source opened");
     } finally {
       setActiveAction(undefined);
     }
@@ -586,36 +440,6 @@ function App() {
           <strong>{realms[0]?.id ?? "none"}</strong>
         </section>
 
-        <form
-          className="create-capsule"
-          onSubmit={(event) => {
-            event.preventDefault();
-            createCapsule().catch((error: unknown) => {
-              setStatus(error instanceof Error ? error.message : "Create failed");
-            });
-          }}
-        >
-          <label htmlFor="capsule-name">New capsule</label>
-          <input
-            aria-label="Capsule name"
-            id="capsule-name"
-            placeholder="Tool name"
-            value={newCapsuleName}
-            onChange={(event) => setNewCapsuleName(event.target.value)}
-          />
-          <textarea
-            aria-label="Capsule description"
-            placeholder="Short purpose"
-            rows={3}
-            value={newCapsuleDescription}
-            onChange={(event) => setNewCapsuleDescription(event.target.value)}
-          />
-          <button type="submit" disabled={!newCapsuleName.trim() || isCreating}>
-            <Plus size={17} />
-            Create
-          </button>
-        </form>
-
         <section className="capsule-list" aria-label="Capsules">
           {capsules.map((capsule) => (
             <button
@@ -638,11 +462,7 @@ function App() {
             <header className="toolbar">
               <div>
                 <h2>{selected.manifest.name}</h2>
-                <span>
-                  {selected.manifest.entry.type === "web"
-                    ? `${selected.manifest.entry.framework} - ${selected.manifest.entry.main}`
-                    : selected.manifest.entry.path}
-                </span>
+                <span>{selected.manifest.id}</span>
               </div>
               <nav className="actions" aria-label="Capsule actions">
                 <button
@@ -670,49 +490,10 @@ function App() {
                   <FolderOpen size={17} />
                   Source
                 </button>
-                <button
-                  type="button"
-                  title="Fork capsule"
-                  disabled={Boolean(activeAction)}
-                  onClick={() => {
-                    forkCapsule(selected).catch((error: unknown) => {
-                      setStatus(error instanceof Error ? error.message : "Fork failed");
-                    });
-                  }}
-                >
-                  <Copy size={17} />
-                  Fork
-                </button>
-                <button
-                  type="button"
-                  title="Archive capsule"
-                  disabled={Boolean(activeAction)}
-                  onClick={() => {
-                    archiveCapsule(selected).catch((error: unknown) => {
-                      setStatus(error instanceof Error ? error.message : "Archive failed");
-                    });
-                  }}
-                >
-                  <Archive size={17} />
-                  Archive
-                </button>
-                <button
-                  type="button"
-                  title="Delete capsule"
-                  disabled={Boolean(activeAction)}
-                  onClick={() => {
-                    deleteCapsule(selected).catch((error: unknown) => {
-                      setStatus(error instanceof Error ? error.message : "Delete failed");
-                    });
-                  }}
-                >
-                  <Trash2 size={17} />
-                  Delete
-                </button>
               </nav>
             </header>
 
-            <div className="content-grid">
+            <div className={hasPermissionWork ? "content-grid" : "content-grid no-inspector"}>
               <section className="preview">
                 {runningUrl ? (
                   <iframe
@@ -729,47 +510,23 @@ function App() {
                 )}
               </section>
 
-              <section className="inspector">
-                <div className="inspector-header">
-                  <h3>Permissions</h3>
-                  {runningUrl ? (
-                    <a
-                      href={runningUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Open capsule in new tab"
-                    >
-                      <ExternalLink size={17} />
-                    </a>
-                  ) : null}
-                </div>
-                {permissions ? (
-                  <div className="permission-panel">
-                    <section className="trust-panel">
-                      <div>
-                        <strong>Trusted local app</strong>
-                        <span>
-                          Full trust grants every declared capability for this capsule. Critical
-                          grants can read, edit, create, delete, run commands, or access secrets
-                          according to the manifest.
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={Boolean(activeAction)}
-                        onClick={() => {
-                          trustCapsule(selected, !permissions.trusted).catch((error: unknown) => {
-                            setStatus(
-                              error instanceof Error ? error.message : "Trust update failed"
-                            );
-                          });
-                        }}
+              {hasPermissionWork && permissions ? (
+                <section className="inspector">
+                  <div className="inspector-header">
+                    <h3>Permissions</h3>
+                    {runningUrl ? (
+                      <a
+                        href={runningUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Open capsule in new tab"
                       >
-                        {permissions.trusted ? <X size={16} /> : <ShieldCheck size={16} />}
-                        {permissions.trusted ? "Remove" : "Trust"}
-                      </button>
-                    </section>
+                        <ExternalLink size={17} />
+                      </a>
+                    ) : null}
+                  </div>
 
+                  <div className="permission-panel">
                     {permissions.diff.added.length || permissions.diff.removed.length ? (
                       <section className="permission-section">
                         <div className="section-title">
@@ -803,17 +560,10 @@ function App() {
                       </section>
                     ) : null}
 
-                    <section className="permission-section">
-                      <strong>Requested grants</strong>
-                      {permissions.requested.map((descriptor) => {
-                        const granted = permissions.grants.some(
-                          (grant) =>
-                            grant.decision === "allow" &&
-                            grant.capability === descriptor.capability &&
-                            JSON.stringify(grant.scope) === JSON.stringify(descriptor.scope)
-                        );
-
-                        return (
+                    {pendingDescriptors.length ? (
+                      <section className="permission-section">
+                        <strong>Permission requests</strong>
+                        {pendingDescriptors.map((descriptor) => (
                           <div className="permission-row" key={descriptor.key}>
                             <div>
                               <strong>{descriptor.capability}</strong>
@@ -823,39 +573,58 @@ function App() {
                               </span>
                             </div>
                             <div className="permission-actions">
-                              {granted ? <span className="grant-status">Allowed</span> : null}
-                              <button
-                                type="button"
-                                disabled={Boolean(activeAction)}
-                                onClick={() => {
-                                  updateGrant(selected, descriptor, "session").catch(
-                                    (error: unknown) => {
+                              {descriptor.prompt === "explicit-trust" ? (
+                                <button
+                                  type="button"
+                                  disabled={Boolean(activeAction)}
+                                  onClick={() => {
+                                    trustCapsule(selected, true).catch((error: unknown) => {
                                       setStatus(
-                                        error instanceof Error ? error.message : "Grant failed"
+                                        error instanceof Error ? error.message : "Trust failed"
                                       );
-                                    }
-                                  );
-                                }}
-                              >
-                                Session
-                              </button>
+                                    });
+                                  }}
+                                >
+                                  <ShieldCheck size={16} />
+                                  Trust
+                                </button>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(activeAction)}
+                                    onClick={() => {
+                                      updateGrant(selected, descriptor, "session").catch(
+                                        (error: unknown) => {
+                                          setStatus(
+                                            error instanceof Error ? error.message : "Grant failed"
+                                          );
+                                        }
+                                      );
+                                    }}
+                                  >
+                                    Session
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(activeAction)}
+                                    onClick={() => {
+                                      updateGrant(selected, descriptor, "persistent").catch(
+                                        (error: unknown) => {
+                                          setStatus(
+                                            error instanceof Error ? error.message : "Grant failed"
+                                          );
+                                        }
+                                      );
+                                    }}
+                                  >
+                                    Always
+                                  </button>
+                                </>
+                              )}
                               <button
                                 type="button"
-                                disabled={Boolean(activeAction)}
-                                onClick={() => {
-                                  updateGrant(selected, descriptor, "persistent").catch(
-                                    (error: unknown) => {
-                                      setStatus(
-                                        error instanceof Error ? error.message : "Grant failed"
-                                      );
-                                    }
-                                  );
-                                }}
-                              >
-                                Always
-                              </button>
-                              <button
-                                type="button"
+                                title="Deny permission"
                                 disabled={Boolean(activeAction)}
                                 onClick={() => {
                                   updateGrant(selected, descriptor, "persistent", "deny").catch(
@@ -867,74 +636,22 @@ function App() {
                                   );
                                 }}
                               >
-                                Deny
+                                <X size={15} />
                               </button>
                             </div>
                           </div>
-                        );
-                      })}
-                    </section>
-
-                    <section className="permission-section">
-                      <strong>Current grants</strong>
-                      {permissions.grants.length ? (
-                        permissions.grants.map((grant) => (
-                          <div className="grant-row" key={grant.id}>
-                            <span>
-                              {grant.decision} {grant.capability}.{scopeText(grant.scope)}{" "}
-                              {grant.access.join("/")} ({grant.lifetime})
-                            </span>
-                            <button
-                              type="button"
-                              title="Revoke grant"
-                              disabled={Boolean(activeAction)}
-                              onClick={() => {
-                                revokeGrant(selected, grant.id).catch((error: unknown) => {
-                                  setStatus(
-                                    error instanceof Error ? error.message : "Revoke failed"
-                                  );
-                                });
-                              }}
-                            >
-                              <X size={15} />
-                            </button>
-                          </div>
-                        ))
-                      ) : (
-                        <span className="muted">No stored grants</span>
-                      )}
-                    </section>
-
-                    <section className="permission-section">
-                      <strong>Audit log</strong>
-                      {permissions.events.length ? (
-                        permissions.events.slice(0, 12).map((event) => (
-                          <span className="audit-line" key={event.id}>
-                            {event.decision} {event.operation} {event.target} - {event.reason}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="muted">No privileged calls recorded</span>
-                      )}
-                    </section>
-
-                    <section className="permission-section">
-                      <strong>Manifest</strong>
-                      <pre>{JSON.stringify(selected.manifest, null, 2)}</pre>
-                    </section>
+                        ))}
+                      </section>
+                    ) : null}
                   </div>
-                ) : (
-                  <div className="permission-panel">
-                    <span className="muted">Loading permissions</span>
-                  </div>
-                )}
-              </section>
+                </section>
+              ) : null}
             </div>
           </>
         ) : (
           <section className="empty-state">
             <h2>No capsules</h2>
-            <span>Create one in the default realm to start the loop.</span>
+            <span>No capsules in this realm.</span>
           </section>
         )}
       </section>

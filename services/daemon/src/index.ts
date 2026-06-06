@@ -1930,6 +1930,42 @@ app.post<{ Params: { realmId: string; capsuleId: string } }>(
   }
 );
 
+app.get<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/status",
+  async (request, reply) => {
+    const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
+    if (!capsule) {
+      return reply.code(404).send({ error: "Capsule not found" });
+    }
+
+    return {
+      status: capsuleDevHost.readStatus(capsule) ?? {
+        capsuleId: capsule.manifest.id,
+        realmId: capsule.realmId,
+        revision: 0,
+        state: "stopped"
+      }
+    };
+  }
+);
+
+app.delete<{ Params: { realmId: string; capsuleId: string } }>(
+  "/api/realms/:realmId/capsules/:capsuleId/launch",
+  async (request, reply) => {
+    const capsule = await findCapsule(request.params.realmId, request.params.capsuleId);
+    if (!capsule) {
+      return reply.code(404).send({ error: "Capsule not found" });
+    }
+
+    capsuleDevHost.deactivate(capsule);
+    return {
+      id: capsule.manifest.id,
+      realm: capsule.realmId,
+      status: "stopped"
+    };
+  }
+);
+
 app.post<{ Params: { realmId: string; capsuleId: string } }>(
   "/api/realms/:realmId/capsules/:capsuleId/source/open",
   async (request, reply) => {
