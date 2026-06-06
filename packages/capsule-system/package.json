@@ -14,9 +14,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "tsx --test test/runtime-result.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "better-result": "^2.9.2"
+  },
   "devDependencies": {
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
 }

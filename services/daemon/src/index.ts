@@ -490,8 +490,8 @@ async function authorizeStateRequest(
     operation,
     target
   });
-  if (!resolution.ok) {
-    await reply.code(403).send({ error: resolution.reason });
+  if (resolution.isErr()) {
+    await sendPermissionResolutionDenied(reply, resolution.error, operation, target);
     return undefined;
   }
 
@@ -624,13 +624,24 @@ async function authorizeFileOperation(
     target: candidates?.targetPath ?? options.requestedPath
   });
 
-  if (!resolution.ok) {
-    await reply.code(403).send({ error: resolution.reason });
+  if (resolution.isErr()) {
+    await sendPermissionResolutionDenied(
+      reply,
+      resolution.error,
+      options.operation,
+      candidates?.targetPath ?? options.requestedPath
+    );
     return undefined;
   }
 
   if (!candidates?.targetPath) {
-    await reply.code(403).send({ error: "No declared file scope matched the requested path" });
+    await reply.code(403).send({
+      code: "permission-denied",
+      error: "No declared file scope matched the requested path",
+      operation: options.operation,
+      reason: "No declared file scope matched the requested path",
+      target: options.requestedPath
+    });
     return undefined;
   }
 
@@ -848,6 +859,57 @@ function networkDescriptorMatches(descriptor: CapabilityDescriptor, url: URL): b
     url.hostname.startsWith("192.168.") ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname)
   );
+}
+
+function descriptorMatchesPermissionRequest(
+  descriptor: CapabilityDescriptor,
+  request: Record<string, unknown>
+): boolean {
+  if (descriptor.capability !== request.capability || descriptor.scope.scope !== request.scope) {
+    return false;
+  }
+
+  if (typeof request.command === "string" && descriptor.scope.command !== request.command) {
+    return false;
+  }
+
+  if (typeof request.path === "string" && descriptor.scope.path !== request.path) {
+    return false;
+  }
+
+  if (Array.isArray(request.hosts)) {
+    if (!Array.isArray(descriptor.scope.hosts)) {
+      return false;
+    }
+
+    const descriptorHosts = descriptor.scope.hosts.map(String);
+    if (
+      !request.hosts.every((host) => typeof host === "string" && descriptorHosts.includes(host))
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function sendPermissionResolutionDenied(
+  reply: FastifyReply,
+  error: {
+    readonly descriptor?: CapabilityDescriptor;
+    readonly reason: string;
+  },
+  operation: string,
+  target: string
+) {
+  return reply.code(403).send({
+    capability: error.descriptor?.capability,
+    code: "permission-denied",
+    error: error.reason,
+    operation,
+    reason: error.reason,
+    target
+  });
 }
 
 app.get("/api/health", async () => ({
@@ -1229,6 +1291,62 @@ app.put<{ Body: unknown; Params: { storeName: string } }>(
   }
 );
 
+app.post<{ Body: unknown }>("/api/capsule-system/permissions/ensure", async (request, reply) => {
+  try {
+    const body = readJsonObject(request.body);
+    if (!body) {
+      throw new Error("Permission request body must be an object");
+    }
+
+    const capsule = await authorizeCapsuleRequest(request, reply);
+    if (!capsule) {
+      return undefined;
+    }
+
+    const capability = readStringField(body, "capability");
+    if (
+      capability !== "commands" &&
+      capability !== "files" &&
+      capability !== "network" &&
+      capability !== "storage" &&
+      capability !== "system"
+    ) {
+      throw new Error("Capability family is invalid");
+    }
+
+    const access = readStringArrayField(body, "access");
+    if (!access || access.length === 0) {
+      throw new Error("Permission access must be a non-empty string array");
+    }
+
+    const scope = readStringField(body, "scope");
+    const target = `${capability}.${scope} ${access.join("/")}`;
+    const resolution = permissionPlatform.resolve(capsule, {
+      access,
+      capability,
+      descriptorMatches: (descriptor) => descriptorMatchesPermissionRequest(descriptor, body),
+      operation: "permissions.ensure",
+      target
+    });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(reply, resolution.error, "permissions.ensure", target);
+    }
+
+    return {
+      permission: {
+        access: resolution.value.descriptor.access,
+        capability: resolution.value.descriptor.capability,
+        granted: true,
+        scope: resolution.value.descriptor.scope
+      }
+    };
+  } catch (error) {
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : "Could not ensure permission"
+    });
+  }
+});
+
 app.post<{ Body: unknown }>("/api/capsule-system/files/read-directory", async (request, reply) => {
   try {
     const body = readJsonObject(request.body);
@@ -1374,8 +1492,13 @@ app.post<{ Body: unknown }>("/api/capsule-system/commands/run", async (request, 
       operation: shell ? "commands.run-shell" : "commands.run",
       target: shell ? command : [command, ...args].join(" ")
     });
-    if (!resolution.ok) {
-      return reply.code(403).send({ error: resolution.reason });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(
+        reply,
+        resolution.error,
+        shell ? "commands.run-shell" : "commands.run",
+        shell ? command : [command, ...args].join(" ")
+      );
     }
 
     return await captureCommand(command, shell ? [] : args, { shell });
@@ -1407,8 +1530,13 @@ app.post<{ Body: unknown }>("/api/capsule-system/network/fetch", async (request,
       operation: "network.fetch",
       target: url.toString()
     });
-    if (!resolution.ok) {
-      return reply.code(403).send({ error: resolution.reason });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(
+        reply,
+        resolution.error,
+        "network.fetch",
+        url.toString()
+      );
     }
 
     const response = await fetch(url, {
@@ -1449,8 +1577,13 @@ app.post<{ Body: unknown }>(
         operation: "system.open-external-url",
         target: url.toString()
       });
-      if (!resolution.ok) {
-        return reply.code(403).send({ error: resolution.reason });
+      if (resolution.isErr()) {
+        return sendPermissionResolutionDenied(
+          reply,
+          resolution.error,
+          "system.open-external-url",
+          url.toString()
+        );
       }
 
       openPath(url.toString());
@@ -1483,8 +1616,13 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/open-path", async (reque
       operation: "system.open-path",
       target: targetPath
     });
-    if (!resolution.ok) {
-      return reply.code(403).send({ error: resolution.reason });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(
+        reply,
+        resolution.error,
+        "system.open-path",
+        targetPath
+      );
     }
 
     openPath(targetPath);
@@ -1516,8 +1654,8 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/get", async (req
       operation: "system.secrets.get",
       target: key
     });
-    if (!resolution.ok) {
-      return reply.code(403).send({ error: resolution.reason });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(reply, resolution.error, "system.secrets.get", key);
     }
 
     const value = readOptionalValueRow(
@@ -1558,8 +1696,8 @@ app.post<{ Body: unknown }>("/api/capsule-system/system/secrets/set", async (req
       operation: "system.secrets.set",
       target: key
     });
-    if (!resolution.ok) {
-      return reply.code(403).send({ error: resolution.reason });
+    if (resolution.isErr()) {
+      return sendPermissionResolutionDenied(reply, resolution.error, "system.secrets.set", key);
     }
 
     permissionPlatform.database

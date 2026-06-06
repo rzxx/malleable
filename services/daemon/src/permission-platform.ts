@@ -13,6 +13,7 @@ import {
   type PermissionEvent,
   type PermissionGrant
 } from "@malleable/capsule-schema";
+import { Result, TaggedError } from "better-result";
 
 export type CapsulePermissionSubject = {
   readonly capsulePath: string;
@@ -46,17 +47,19 @@ export type PermissionSummary = {
   readonly trusted: boolean;
 };
 
-export type PermissionResolution =
-  | {
-      readonly descriptor: CapabilityDescriptor;
-      readonly grant: PermissionGrant;
-      readonly ok: true;
-    }
-  | {
-      readonly descriptor?: CapabilityDescriptor;
-      readonly ok: false;
-      readonly reason: string;
-    };
+class PermissionResolutionError extends TaggedError("PermissionResolutionError")<{
+  descriptor?: CapabilityDescriptor;
+  message: string;
+  reason: string;
+}>() {}
+
+export type PermissionResolution = Result<
+  {
+    readonly descriptor: CapabilityDescriptor;
+    readonly grant: PermissionGrant;
+  },
+  PermissionResolutionError
+>;
 
 const permissionFamilies = ["commands", "files", "network", "storage", "system"] as const;
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
@@ -615,10 +618,12 @@ export class PermissionPlatform {
         reason: "Capability was not declared in capsule.json",
         target: options.target
       });
-      return {
-        ok: false,
-        reason: "Capability was not declared in capsule.json"
-      };
+      return Result.err(
+        new PermissionResolutionError({
+          message: "Capability was not declared in capsule.json",
+          reason: "Capability was not declared in capsule.json"
+        })
+      );
     }
 
     const manifestHash = manifestCapabilityHash(capsule.manifest);
@@ -632,11 +637,13 @@ export class PermissionPlatform {
         reason: "Permission grant is denied",
         target: options.target
       });
-      return {
-        descriptor,
-        ok: false,
-        reason: "Permission grant is denied"
-      };
+      return Result.err(
+        new PermissionResolutionError({
+          descriptor,
+          message: "Permission grant is denied",
+          reason: "Permission grant is denied"
+        })
+      );
     }
 
     const grant = grants.find((candidate) => isAllowingGrant(candidate, descriptor, manifestHash));
@@ -648,14 +655,17 @@ export class PermissionPlatform {
         reason: "Capability has not been granted",
         target: options.target
       });
-      return {
-        descriptor,
-        ok: false,
-        reason:
-          descriptor.prompt === "explicit-trust"
-            ? "Capability requires an explicit trust grant"
-            : "Capability has not been granted"
-      };
+      const reason =
+        descriptor.prompt === "explicit-trust"
+          ? "Capability requires an explicit trust grant"
+          : "Capability has not been granted";
+      return Result.err(
+        new PermissionResolutionError({
+          descriptor,
+          message: reason,
+          reason
+        })
+      );
     }
 
     this.database
@@ -672,11 +682,10 @@ export class PermissionPlatform {
       reason: "Permission grant allowed operation",
       target: options.target
     });
-    return {
+    return Result.ok({
       descriptor,
-      grant,
-      ok: true
-    };
+      grant
+    });
   }
 
   readSummary(capsule: CapsulePermissionSubject): PermissionSummary {

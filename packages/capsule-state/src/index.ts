@@ -1,16 +1,14 @@
+import { Result, TaggedError } from "better-result";
+
 type JsonRecord = Record<string, unknown>;
 
 export type SortDirection = "asc" | "desc";
 
-export type ParseResult<TValue> =
-  | {
-      readonly ok: true;
-      readonly value: TValue;
-    }
-  | {
-      readonly message: string;
-      readonly ok: false;
-    };
+export class StateSchemaError extends TaggedError("StateSchemaError")<{
+  message: string;
+}>() {}
+
+export type ParseResult<TValue> = Result<TValue, StateSchemaError>;
 
 export type StateSchema<TValue> = {
   readonly optional: false;
@@ -110,11 +108,11 @@ export type CapsuleStateClient = {
 };
 
 function ok<TValue>(value: TValue): ParseResult<TValue> {
-  return { ok: true, value };
+  return Result.ok(value);
 }
 
 function fail(message: string): ParseResult<never> {
-  return { message, ok: false };
+  return Result.err(new StateSchemaError({ message }));
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -126,11 +124,11 @@ function parseObject(value: unknown): JsonRecord | undefined {
 }
 
 function requireResult<TValue>(result: ParseResult<TValue>, label: string): TValue {
-  if (result.ok) {
+  if (Result.isOk(result)) {
     return result.value;
   }
 
-  throw new Error(`${label}: ${result.message}`);
+  throw new Error(`${label}: ${result.error.message}`);
 }
 
 function buildSchema<TValue>(parse: (value: unknown) => ParseResult<TValue>): StateSchema<TValue> {
@@ -162,7 +160,7 @@ function matchesObjectShape<TShape extends ObjectShape>(
   }
 
   for (const [key, childSchema] of Object.entries(shape)) {
-    if (!readOptionalResult(childSchema, record, key).ok) {
+    if (Result.isError(readOptionalResult(childSchema, record, key))) {
       return false;
     }
   }
@@ -174,7 +172,7 @@ function matchesUnion<TSchemas extends readonly StateSchema<unknown>[]>(
   source: unknown,
   schemas: TSchemas
 ): source is InferSchema<TSchemas[number]> {
-  return schemas.some((candidate) => candidate.parse(source).ok);
+  return schemas.some((candidate) => Result.isOk(candidate.parse(source)));
 }
 
 export const schema = {
@@ -187,7 +185,7 @@ export const schema = {
       const parsed: TItem[] = [];
       for (const item of value) {
         const result = itemSchema.parse(item);
-        if (!result.ok) {
+        if (Result.isError(result)) {
           return result;
         }
         parsed.push(result.value);

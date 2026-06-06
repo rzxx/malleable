@@ -16,6 +16,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "better-result": "^2.9.2"
+  },
   "devDependencies": {
     "typescript": "^6.0.3"
   }

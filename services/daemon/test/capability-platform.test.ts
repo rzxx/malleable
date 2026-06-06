@@ -92,7 +92,7 @@ await test("low-risk own-data storage is auto-granted and audited", async () => 
       target: "preferences"
     });
 
-    assert.equal(resolution.ok, true);
+    assert.equal(resolution.isOk(), true);
     assert.equal(platform.readGrants(subject).length, 1);
     assert.equal(platform.readEvents(subject)[0]?.decision, "allow");
   });
@@ -125,8 +125,8 @@ await test("high-risk file access requires an explicit grant", async () => {
       operation: "files.read-directory",
       target: path.join(root, "project")
     });
-    assert.equal(denied.ok, false);
-    assert.match(denied.reason, /not been granted|explicit trust/);
+    assert.equal(denied.isErr(), true);
+    assert.match(denied.isErr() ? denied.error.reason : "", /not been granted|explicit trust/);
 
     const descriptor = platform.readSummary(subject).requested[0];
     assert.ok(descriptor);
@@ -142,7 +142,7 @@ await test("high-risk file access requires an explicit grant", async () => {
       operation: "files.read-directory",
       target: path.join(root, "project")
     });
-    assert.equal(allowed.ok, true);
+    assert.equal(allowed.isOk(), true);
   });
 });
 
@@ -187,8 +187,8 @@ await test("once grants are consumed after a successful operation", async () => 
       target: "git status"
     });
 
-    assert.equal(first.ok, true);
-    assert.equal(second.ok, false);
+    assert.equal(first.isOk(), true);
+    assert.equal(second.isErr(), true);
   });
 });
 
