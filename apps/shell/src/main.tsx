@@ -13,10 +13,14 @@ import {
   X
 } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { z } from "zod";
 
 import "./styles.css";
+
+declare global {
+  var malleableShellRoot: Root | undefined;
+}
 
 const apiBase = "http://127.0.0.1:4877";
 
@@ -938,7 +942,19 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  throw new Error("Shell root element was not found");
+}
+
+const root = globalThis.malleableShellRoot ?? createRoot(rootElement);
+globalThis.malleableShellRoot = root;
+
+if (import.meta.hot) {
+  import.meta.hot.accept();
+}
+
+root.render(
   <StrictMode>
     <App />
   </StrictMode>

@@ -68,6 +68,14 @@ type StateValueRow = {
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
+app.addContentTypeParser(
+  "application/x-www-form-urlencoded",
+  { parseAs: "string" },
+  (_request, body, done) => {
+    const source = typeof body === "string" ? body : body.toString("utf8");
+    done(null, Object.fromEntries(new URLSearchParams(source)));
+  }
+);
 
 const capsuleSessions = new Map<string, CapsuleSession>();
 const capsuleDevHost = new SharedCapsuleViteHost(workspaceRoot);
@@ -441,6 +449,15 @@ function readBearerToken(request: FastifyRequest): string | undefined {
   }
 
   return authorization.slice("Bearer ".length);
+}
+
+function readErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+
+  const code: unknown = Reflect.get(error, "code");
+  return typeof code === "string" ? code : undefined;
 }
 
 function isInsideOrEqual(filePath: string, rootPath: string): boolean {
@@ -2018,4 +2035,26 @@ app.get<{ Params: { realmId: string; capsuleId: string } }>(
   async (_request, reply) => reply.redirect("./")
 );
 
-await app.listen({ port, host: "127.0.0.1" });
+async function listenWithPortRetry(retries = 20): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await app.listen({ port, host: "127.0.0.1" });
+      return;
+    } catch (error) {
+      const code = readErrorCode(error);
+      if (code !== "EADDRINUSE" || attempt >= retries) {
+        throw error;
+      }
+
+      app.log.warn(
+        { attempt: attempt + 1, port },
+        "Daemon port is still busy after restart; retrying"
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+    }
+  }
+}
+
+await listenWithPortRetry();
